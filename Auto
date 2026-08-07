@@ -16,7 +16,7 @@ local InterfaceManager = loadstring(game:HttpGet(
 --------------------------------------------------
 
 local Window = Fluent:CreateWindow({
-    Title = "Fluent " .. Fluent.Version,
+    Title = "MMusti " .. Fluent.Version,
     SubTitle = "Fast Ore Miner",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
@@ -75,27 +75,31 @@ local BlocksData =
 
 local AutoMine = false
 
+-- Tiefste erlaubte Ebene
 local MIN_DEPTH = -4999
+
+-- Ab welcher Ebene angefangen wird
+-- 0 = komplette Mine
+-- -3000 = nur -3000 bis -4999
+local START_DEPTH = 0
 
 
 --------------------------------------------------
 -- SPEED
 --------------------------------------------------
 
--- Wie viele Damage-Aufrufe pro Tick gemacht werden.
--- Falls es Probleme gibt:
+-- Damage-Aufrufe pro Tick
+-- Falls Probleme auftreten:
 -- 5 -> 3 -> 2 -> 1
 
-local DAMAGE_BURST = 100
+local DAMAGE_BURST = 5
 
 
 --------------------------------------------------
 -- RUN ID
 --------------------------------------------------
 
--- Verhindert, dass mehrere AutoMine-Threads
--- gleichzeitig laufen, wenn schnell an/aus
--- geschaltet wird.
+-- Verhindert mehrere Auto-Mine Threads gleichzeitig.
 
 local MiningRunId = 0
 
@@ -110,6 +114,23 @@ end
 
 
 --------------------------------------------------
+-- Y RANGE CHECK
+--------------------------------------------------
+
+local function isYInMiningRange(y)
+
+    if y == nil then
+        return false
+    end
+
+    return
+        y >= MIN_DEPTH
+        and y <= START_DEPTH
+
+end
+
+
+--------------------------------------------------
 -- GET BLOCK INFO
 --------------------------------------------------
 
@@ -119,10 +140,12 @@ local function getBlockInfo(block)
         return nil
     end
 
+
     local blockData =
         MiningServiceClient.blocks[
             block.Name
         ]
+
 
     if not blockData then
         return nil
@@ -271,13 +294,8 @@ local function isAllowedDepth(block)
         getBlockY(block)
 
 
-    if y == nil then
-        return false
-    end
-
-
     return
-        y >= MIN_DEPTH
+        isYInMiningRange(y)
 
 end
 
@@ -286,8 +304,9 @@ end
 -- BLOCK INDEX
 --------------------------------------------------
 
--- Dadurch müssen wir NICHT mehr für jede
--- Y-Ebene mineFolder:GetChildren() durchsuchen.
+-- Speichert Blöcke nach ihrer Y-Ebene.
+-- Dadurch muss nicht ständig die komplette Mine
+-- durchsucht werden.
 
 local BlocksByY = {}
 
@@ -369,22 +388,34 @@ local function registerBlock(block)
     end
 
 
+    --------------------------------------------------
+    -- IGNORE IMPOSSIBLE LEVELS
+    --------------------------------------------------
+
     if y < MIN_DEPTH then
         return
     end
 
 
-    --------------------------------------------------
-    -- ALL BLOCKS
-    --------------------------------------------------
-
-    AllBlocks[block] = true
-
-    BlockYCache[block] = y
+    if y > 0 then
+        return
+    end
 
 
     --------------------------------------------------
-    -- Y INDEX
+    -- SAVE BLOCK
+    --------------------------------------------------
+
+    AllBlocks[block] =
+        true
+
+
+    BlockYCache[block] =
+        y
+
+
+    --------------------------------------------------
+    -- SAVE BY Y
     --------------------------------------------------
 
     if not BlocksByY[y] then
@@ -402,15 +433,19 @@ local function registerBlock(block)
     -- SELECTED ORE CACHE
     --------------------------------------------------
 
-    local info =
-        getBlockInfo(block)
+    if isYInMiningRange(y) then
+
+        local info =
+            getBlockInfo(block)
 
 
-    if info
-        and isSelectedOre(info) then
+        if info
+            and isSelectedOre(info) then
 
-        SelectedOreBlocks[block] =
-            true
+            SelectedOreBlocks[block] =
+                true
+
+        end
 
     end
 
@@ -439,6 +474,7 @@ local function unregisterBlock(block)
     if y
         and BlocksByY[y] then
 
+
         BlocksByY[y][block] =
             nil
 
@@ -456,7 +492,7 @@ local function unregisterBlock(block)
 
 
     --------------------------------------------------
-    -- REMOVE FROM CACHES
+    -- REMOVE FROM CACHE
     --------------------------------------------------
 
     AllBlocks[block] =
@@ -486,18 +522,31 @@ local function rebuildSelectedOreCache()
         AllBlocks
     ) do
 
+
         if block
             and block.Parent then
 
-            local info =
-                getBlockInfo(block)
+
+            local y =
+                BlockYCache[block]
+                or getBlockY(block)
 
 
-            if info
-                and isSelectedOre(info) then
+            if isYInMiningRange(y) then
 
-                SelectedOreBlocks[block] =
-                    true
+
+                local info =
+                    getBlockInfo(block)
+
+
+                if info
+                    and isSelectedOre(info) then
+
+
+                    SelectedOreBlocks[block] =
+                        true
+
+                end
 
             end
 
@@ -524,7 +573,7 @@ local function setupMineIndex()
 
 
     --------------------------------------------------
-    -- SAME FOLDER ALREADY INDEXED
+    -- ALREADY INDEXED
     --------------------------------------------------
 
     if IndexedFolder == folder then
@@ -533,7 +582,7 @@ local function setupMineIndex()
 
 
     --------------------------------------------------
-    -- RESET
+    -- RESET OLD FOLDER
     --------------------------------------------------
 
     clearFolderConnections()
@@ -559,7 +608,7 @@ local function setupMineIndex()
 
 
     --------------------------------------------------
-    -- NEW BLOCKS
+    -- NEW BLOCK
     --------------------------------------------------
 
     table.insert(
@@ -577,7 +626,7 @@ local function setupMineIndex()
 
 
     --------------------------------------------------
-    -- REMOVED BLOCKS
+    -- REMOVED BLOCK
     --------------------------------------------------
 
     table.insert(
@@ -624,6 +673,10 @@ local function damageBlock(block)
     end
 
 
+    --------------------------------------------------
+    -- CHECK START / MIN DEPTH
+    --------------------------------------------------
+
     if not isAllowedDepth(block) then
         return false
     end
@@ -639,7 +692,7 @@ local function damageBlock(block)
 
 
     --------------------------------------------------
-    -- NEVER MINE BEDROCK
+    -- NEVER BEDROCK
     --------------------------------------------------
 
     if isBedrock(info) then
@@ -685,7 +738,20 @@ local function mineBlockFast(
 
 
         --------------------------------------------------
-        -- CHECK TYPE
+        -- CHECK Y
+        --------------------------------------------------
+
+        local y =
+            getBlockY(block)
+
+
+        if not isYInMiningRange(y) then
+            return
+        end
+
+
+        --------------------------------------------------
+        -- CHECK BLOCK TYPE
         --------------------------------------------------
 
         local info =
@@ -693,17 +759,17 @@ local function mineBlockFast(
 
 
         if not info then
-            break
+            return
         end
 
 
         if isBedrock(info) then
-            break
+            return
         end
 
 
         if not checkFunction(info) then
-            break
+            return
         end
 
 
@@ -715,24 +781,24 @@ local function mineBlockFast(
 
 
             if not block.Parent then
-                break
+                return
             end
 
 
             if not isCurrentRun(runId) then
-                break
+                return
             end
 
 
             if not damageBlock(block) then
-                break
+                return
             end
 
         end
 
 
         --------------------------------------------------
-        -- ONE YIELD PER BURST
+        -- YIELD AFTER BURST
         --------------------------------------------------
 
         task.wait()
@@ -792,6 +858,15 @@ local function mineLevel(
     end
 
 
+    --------------------------------------------------
+    -- DO NOT MINE ABOVE START DEPTH
+    --------------------------------------------------
+
+    if not isYInMiningRange(y) then
+        return
+    end
+
+
     local level =
         BlocksByY[y]
 
@@ -804,9 +879,6 @@ local function mineLevel(
     --------------------------------------------------
     -- SNAPSHOT
     --------------------------------------------------
-
-    -- Wir kopieren nur die aktuelle Y-Ebene,
-    -- nicht die komplette Mine.
 
     local blocks = {}
 
@@ -822,7 +894,7 @@ local function mineLevel(
 
 
     --------------------------------------------------
-    -- PROCESS LEVEL
+    -- MINE LEVEL
     --------------------------------------------------
 
     for _, block in ipairs(
@@ -852,6 +924,7 @@ local function mineLevel(
 
                 if isSelectedOre(info) then
 
+
                     mineSelectedOre(
                         block,
                         runId
@@ -863,6 +936,7 @@ local function mineLevel(
                 --------------------------------------------------
 
                 elseif isStone(info) then
+
 
                     mineStone(
                         block,
@@ -876,7 +950,7 @@ local function mineLevel(
 
                 elseif isBedrock(info) then
 
-                    -- Skip
+                    -- Bedrock überspringen
 
 
                 --------------------------------------------------
@@ -885,7 +959,7 @@ local function mineLevel(
 
                 else
 
-                    -- Skip
+                    -- Nicht ausgewähltes Erz überspringen
 
                 end
 
@@ -899,14 +973,28 @@ end
 
 
 --------------------------------------------------
--- MINE DOWN
+-- MINE FROM START DEPTH TO BOTTOM
 --------------------------------------------------
 
 local function mineDownToBottom(
     runId
 )
 
-    for y = 0, MIN_DEPTH, -1 do
+    --------------------------------------------------
+    -- IMPORTANT:
+    --
+    -- START_DEPTH = -3000
+    --
+    -- macht:
+    --
+    -- -3000
+    -- -3001
+    -- -3002
+    -- ...
+    -- -4999
+    --------------------------------------------------
+
+    for y = START_DEPTH, MIN_DEPTH, -1 do
 
 
         if not isCurrentRun(runId) then
@@ -915,11 +1003,12 @@ local function mineDownToBottom(
 
 
         --------------------------------------------------
-        -- CHECK IF MINE FOLDER CHANGED
+        -- MINE FOLDER CHANGED?
         --------------------------------------------------
 
         if MiningServiceClient.mineFolder
             ~= IndexedFolder then
+
 
             setupMineIndex()
 
@@ -927,7 +1016,7 @@ local function mineDownToBottom(
 
 
         --------------------------------------------------
-        -- MINE THIS COMPLETE LEVEL
+        -- COMPLETE LEVEL
         --------------------------------------------------
 
         mineLevel(
@@ -937,7 +1026,7 @@ local function mineDownToBottom(
 
 
         --------------------------------------------------
-        -- SMALL YIELD BETWEEN LEVELS
+        -- YIELD EVERY 25 LEVELS
         --------------------------------------------------
 
         if y % 25 == 0 then
@@ -963,11 +1052,12 @@ local function getNextSelectedOre()
 
 
         --------------------------------------------------
-        -- CLEAN DEAD BLOCK
+        -- DEAD BLOCK
         --------------------------------------------------
 
         if not block
             or not block.Parent then
+
 
             SelectedOreBlocks[block] =
                 nil
@@ -976,28 +1066,50 @@ local function getNextSelectedOre()
         else
 
 
-            local info =
-                getBlockInfo(block)
+            local y =
+                BlockYCache[block]
+                or getBlockY(block)
 
 
             --------------------------------------------------
-            -- NO LONGER SELECTED
+            -- OUTSIDE START DEPTH
             --------------------------------------------------
 
-            if not info
-                or not isSelectedOre(info) then
+            if not isYInMiningRange(y) then
+
 
                 SelectedOreBlocks[block] =
                     nil
 
 
-            --------------------------------------------------
-            -- VALID ORE
-            --------------------------------------------------
-
             else
 
-                return block
+
+                local info =
+                    getBlockInfo(block)
+
+
+                --------------------------------------------------
+                -- NOT SELECTED ANYMORE
+                --------------------------------------------------
+
+                if not info
+                    or not isSelectedOre(info) then
+
+
+                    SelectedOreBlocks[block] =
+                        nil
+
+
+                --------------------------------------------------
+                -- VALID TARGET
+                --------------------------------------------------
+
+                else
+
+                    return block
+
+                end
 
             end
 
@@ -1012,7 +1124,7 @@ end
 
 
 --------------------------------------------------
--- SELECTED ORE MINING AFTER BOTTOM
+-- KEEP MINING SELECTED ORES
 --------------------------------------------------
 
 local function selectedOreMining(
@@ -1029,13 +1141,14 @@ local function selectedOreMining(
         if MiningServiceClient.mineFolder
             ~= IndexedFolder then
 
+
             setupMineIndex()
 
         end
 
 
         --------------------------------------------------
-        -- GET CACHED ORE
+        -- GET ORE
         --------------------------------------------------
 
         local target =
@@ -1044,12 +1157,15 @@ local function selectedOreMining(
 
         if target then
 
+
             mineSelectedOre(
                 target,
                 runId
             )
 
+
         else
+
 
             task.wait(0.1)
 
@@ -1094,14 +1210,14 @@ local function startMining(
 
 
         --------------------------------------------------
-        -- REFRESH ORE CACHE
+        -- REFRESH ORES
         --------------------------------------------------
 
         rebuildSelectedOreCache()
 
 
         --------------------------------------------------
-        -- MINE ALL LEVELS
+        -- START AT SELECTED DEPTH
         --------------------------------------------------
 
         mineDownToBottom(
@@ -1110,10 +1226,11 @@ local function startMining(
 
 
         --------------------------------------------------
-        -- KEEP MINING SELECTED ORES
+        -- AFTER BOTTOM KEEP MINING ORES
         --------------------------------------------------
 
         if isCurrentRun(runId) then
+
 
             selectedOreMining(
                 runId
@@ -1156,6 +1273,7 @@ for id, data in pairs(
 
         if type(data) == "table" then
 
+
             displayName =
                 data.name
                 or data.Name
@@ -1180,7 +1298,7 @@ table.sort(
 
 
 --------------------------------------------------
--- ORE DROPDOWN
+-- SELECT ORES DROPDOWN
 --------------------------------------------------
 
 local MultiDropdown =
@@ -1238,6 +1356,7 @@ MultiDropdown:OnChanged(
                     if type(data)
                         == "table" then
 
+
                         displayName =
                             data.name
                             or data.Name
@@ -1266,13 +1385,163 @@ MultiDropdown:OnChanged(
 
 
         --------------------------------------------------
-        -- UPDATE FAST CACHE
+        -- UPDATE FAST ORE CACHE
         --------------------------------------------------
 
         rebuildSelectedOreCache()
 
     end
 )
+
+
+--------------------------------------------------
+-- START DEPTH INPUT
+--------------------------------------------------
+
+local StartDepthInput
+
+
+StartDepthInput =
+    Tabs.Main:AddInput(
+        "StartDepth",
+        {
+
+            Title =
+                "Start Depth",
+
+            Description =
+                "Mine from this level down to -4999.",
+
+            Default =
+                "0",
+
+            Placeholder =
+                "-3000",
+
+            -- false because we validate it ourselves.
+            -- This also makes entering '-' reliable.
+            Numeric =
+                false,
+
+            -- Callback only after Enter is pressed.
+            Finished =
+                true,
+
+            Callback =
+                function(Value)
+
+
+                    --------------------------------------------------
+                    -- CONVERT INPUT
+                    --------------------------------------------------
+
+                    local number =
+                        tonumber(Value)
+
+
+                    if not number then
+
+
+                        Fluent:Notify({
+                            Title =
+                                "Start Depth",
+
+                            Content =
+                                "Enter a number, for example -3000.",
+
+                            Duration =
+                                3
+                        })
+
+
+                        return
+
+                    end
+
+
+                    --------------------------------------------------
+                    -- INTEGER
+                    --------------------------------------------------
+
+                    number =
+                        math.round(number)
+
+
+                    --------------------------------------------------
+                    -- LIMIT:
+                    -- MAX = 0
+                    -- MIN = -4999
+                    --------------------------------------------------
+
+                    local newDepth =
+                        math.clamp(
+                            number,
+                            MIN_DEPTH,
+                            0
+                        )
+
+
+                    --------------------------------------------------
+                    -- SAVE
+                    --------------------------------------------------
+
+                    START_DEPTH =
+                        newDepth
+
+
+                    --------------------------------------------------
+                    -- UPDATE ORE CACHE
+                    --------------------------------------------------
+
+                    rebuildSelectedOreCache()
+
+
+                    --------------------------------------------------
+                    -- NOTIFICATION
+                    --------------------------------------------------
+
+                    Fluent:Notify({
+                        Title =
+                            "Start Depth",
+
+                        Content =
+                            "Mining will start at Y = "
+                            .. tostring(START_DEPTH)
+                            .. " and continue to "
+                            .. tostring(MIN_DEPTH)
+                            .. ".",
+
+                        Duration =
+                            3
+                    })
+
+
+                    --------------------------------------------------
+                    -- IF MINER IS ALREADY RUNNING:
+                    -- RESTART WITH NEW DEPTH
+                    --------------------------------------------------
+
+                    if AutoMine then
+
+
+                        MiningRunId =
+                            MiningRunId + 1
+
+
+                        local runId =
+                            MiningRunId
+
+
+                        startMining(
+                            runId
+                        )
+
+                    end
+
+                end
+
+        }
+    )
 
 
 --------------------------------------------------
@@ -1288,7 +1557,7 @@ local Toggle =
                 "Auto Mine",
 
             Description =
-                "Fast mine all levels to -4999.",
+                "Mine from Start Depth to -4999.",
 
             Default =
                 false
@@ -1333,10 +1602,14 @@ Toggle:OnChanged(
                     "Fast Auto Mine",
 
                 Content =
-                    "Fast mining started.",
+                    "Mining from Y = "
+                    .. tostring(START_DEPTH)
+                    .. " to "
+                    .. tostring(MIN_DEPTH)
+                    .. ".",
 
                 Duration =
-                    2
+                    3
             })
 
 
@@ -1376,6 +1649,7 @@ Toggle:OnChanged(
 SaveManager:SetLibrary(
     Fluent
 )
+
 
 InterfaceManager:SetLibrary(
     Fluent
