@@ -1,10 +1,23 @@
-local Fluent = loadstring(game:HttpGet("https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"))()
-local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
-local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+local Fluent = loadstring(game:HttpGet(
+    "https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"
+))()
+
+local SaveManager = loadstring(game:HttpGet(
+    "https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"
+))()
+
+local InterfaceManager = loadstring(game:HttpGet(
+    "https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"
+))()
+
+
+--------------------------------------------------
+-- WINDOW
+--------------------------------------------------
 
 local Window = Fluent:CreateWindow({
     Title = "Fluent " .. Fluent.Version,
-    SubTitle = "Ore Miner",
+    SubTitle = "Fast Ore Miner",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = true,
@@ -12,7 +25,9 @@ local Window = Fluent:CreateWindow({
     MinimizeKey = Enum.KeyCode.LeftControl
 })
 
+
 local Tabs = {
+
     Main = Window:AddTab({
         Title = "Main",
         Icon = ""
@@ -22,6 +37,7 @@ local Tabs = {
         Title = "Settings",
         Icon = "settings"
     })
+
 }
 
 
@@ -29,16 +45,28 @@ local Tabs = {
 -- SERVICES
 --------------------------------------------------
 
-local Rs = cloneref(game:GetService("ReplicatedStorage"))
+local Rs =
+    cloneref(
+        game:GetService("ReplicatedStorage")
+    )
+
 
 local MiningServiceClient =
-    require(Rs.Shared.Services.MiningService.MiningServiceClient)
+    require(
+        Rs.Shared.Services.MiningService.MiningServiceClient
+    )
+
 
 local MiningInfo =
-    require(Rs.Packages.Info).MiningInfo
+    require(
+        Rs.Packages.Info
+    ).MiningInfo
+
 
 local BlocksData =
-    require(Rs.Shared.Info.MiningInfo.Blocks)
+    require(
+        Rs.Shared.Info.MiningInfo.Blocks
+    )
 
 
 --------------------------------------------------
@@ -48,6 +76,37 @@ local BlocksData =
 local AutoMine = false
 
 local MIN_DEPTH = -4999
+
+
+--------------------------------------------------
+-- SPEED
+--------------------------------------------------
+
+-- Wie viele Damage-Aufrufe pro Tick gemacht werden.
+-- Falls es Probleme gibt:
+-- 5 -> 3 -> 2 -> 1
+
+local DAMAGE_BURST = 5
+
+
+--------------------------------------------------
+-- RUN ID
+--------------------------------------------------
+
+-- Verhindert, dass mehrere AutoMine-Threads
+-- gleichzeitig laufen, wenn schnell an/aus
+-- geschaltet wird.
+
+local MiningRunId = 0
+
+
+local function isCurrentRun(runId)
+
+    return
+        AutoMine
+        and runId == MiningRunId
+
+end
 
 
 --------------------------------------------------
@@ -61,31 +120,50 @@ local function getBlockInfo(block)
     end
 
     local blockData =
-        MiningServiceClient.blocks[block.Name]
+        MiningServiceClient.blocks[
+            block.Name
+        ]
 
     if not blockData then
         return nil
     end
 
-    local blockId = blockData[1]
 
-    if not blockId or blockId == "None" then
+    local blockId =
+        blockData[1]
+
+
+    if not blockId
+        or blockId == "None" then
+
         return nil
+
     end
 
+
     local info =
-        MiningInfo:getBlock(blockId)
+        MiningInfo:getBlock(
+            blockId
+        )
+
 
     if not info then
         return nil
     end
 
+
     return {
+
         Id = blockId,
+
         Name = info.name,
+
         HP = info.hp,
+
         Value = info.value,
+
         Model = info.model
+
     }
 
 end
@@ -101,10 +179,12 @@ local function isStone(info)
         return false
     end
 
-    return string.match(
-        info.Id,
-        "^StoneOre%d*$"
-    ) ~= nil
+
+    return
+        string.match(
+            info.Id,
+            "^StoneOre%d*$"
+        ) ~= nil
 
 end
 
@@ -119,13 +199,15 @@ local function isBedrock(info)
         return false
     end
 
-    return info.Id == "Bedrock"
+
+    return
+        info.Id == "Bedrock"
 
 end
 
 
 --------------------------------------------------
--- SELECTED ORE CHECK
+-- SELECTED ORES
 --------------------------------------------------
 
 local SelectedOres = {}
@@ -137,21 +219,27 @@ local function isSelectedOre(info)
         return false
     end
 
+
     if isStone(info) then
         return false
     end
+
 
     if isBedrock(info) then
         return false
     end
 
-    return SelectedOres[info.Id] == true
+
+    return
+        SelectedOres[
+            info.Id
+        ] == true
 
 end
 
 
 --------------------------------------------------
--- GET Y
+-- GET BLOCK Y
 --------------------------------------------------
 
 local function getBlockY(block)
@@ -160,11 +248,13 @@ local function getBlockY(block)
         return nil
     end
 
+
     local y =
         string.match(
             block.Name,
             "^[^_]+_(-?%d+)_"
         )
+
 
     return tonumber(y)
 
@@ -177,13 +267,334 @@ end
 
 local function isAllowedDepth(block)
 
-    local y = getBlockY(block)
+    local y =
+        getBlockY(block)
+
 
     if y == nil then
         return false
     end
 
-    return y >= MIN_DEPTH
+
+    return
+        y >= MIN_DEPTH
+
+end
+
+
+--------------------------------------------------
+-- BLOCK INDEX
+--------------------------------------------------
+
+-- Dadurch müssen wir NICHT mehr für jede
+-- Y-Ebene mineFolder:GetChildren() durchsuchen.
+
+local BlocksByY = {}
+
+local AllBlocks = {}
+
+local BlockYCache = {}
+
+local SelectedOreBlocks = {}
+
+
+local IndexedFolder = nil
+
+local FolderConnections = {}
+
+
+--------------------------------------------------
+-- CLEAR CONNECTIONS
+--------------------------------------------------
+
+local function clearFolderConnections()
+
+    for _, connection in ipairs(
+        FolderConnections
+    ) do
+
+        pcall(function()
+
+            connection:Disconnect()
+
+        end)
+
+    end
+
+
+    FolderConnections = {}
+
+end
+
+
+--------------------------------------------------
+-- CLEAR BLOCK INDEX
+--------------------------------------------------
+
+local function clearBlockIndex()
+
+    BlocksByY = {}
+
+    AllBlocks = {}
+
+    BlockYCache = {}
+
+    SelectedOreBlocks = {}
+
+end
+
+
+--------------------------------------------------
+-- REGISTER BLOCK
+--------------------------------------------------
+
+local function registerBlock(block)
+
+    if not block then
+        return
+    end
+
+
+    if AllBlocks[block] then
+        return
+    end
+
+
+    local y =
+        getBlockY(block)
+
+
+    if y == nil then
+        return
+    end
+
+
+    if y < MIN_DEPTH then
+        return
+    end
+
+
+    --------------------------------------------------
+    -- ALL BLOCKS
+    --------------------------------------------------
+
+    AllBlocks[block] = true
+
+    BlockYCache[block] = y
+
+
+    --------------------------------------------------
+    -- Y INDEX
+    --------------------------------------------------
+
+    if not BlocksByY[y] then
+
+        BlocksByY[y] = {}
+
+    end
+
+
+    BlocksByY[y][block] =
+        true
+
+
+    --------------------------------------------------
+    -- SELECTED ORE CACHE
+    --------------------------------------------------
+
+    local info =
+        getBlockInfo(block)
+
+
+    if info
+        and isSelectedOre(info) then
+
+        SelectedOreBlocks[block] =
+            true
+
+    end
+
+end
+
+
+--------------------------------------------------
+-- UNREGISTER BLOCK
+--------------------------------------------------
+
+local function unregisterBlock(block)
+
+    if not block then
+        return
+    end
+
+
+    local y =
+        BlockYCache[block]
+
+
+    --------------------------------------------------
+    -- REMOVE FROM LEVEL
+    --------------------------------------------------
+
+    if y
+        and BlocksByY[y] then
+
+        BlocksByY[y][block] =
+            nil
+
+
+        if next(
+            BlocksByY[y]
+        ) == nil then
+
+            BlocksByY[y] =
+                nil
+
+        end
+
+    end
+
+
+    --------------------------------------------------
+    -- REMOVE FROM CACHES
+    --------------------------------------------------
+
+    AllBlocks[block] =
+        nil
+
+
+    BlockYCache[block] =
+        nil
+
+
+    SelectedOreBlocks[block] =
+        nil
+
+end
+
+
+--------------------------------------------------
+-- REBUILD SELECTED ORE CACHE
+--------------------------------------------------
+
+local function rebuildSelectedOreCache()
+
+    SelectedOreBlocks = {}
+
+
+    for block in pairs(
+        AllBlocks
+    ) do
+
+        if block
+            and block.Parent then
+
+            local info =
+                getBlockInfo(block)
+
+
+            if info
+                and isSelectedOre(info) then
+
+                SelectedOreBlocks[block] =
+                    true
+
+            end
+
+        end
+
+    end
+
+end
+
+
+--------------------------------------------------
+-- SETUP MINE INDEX
+--------------------------------------------------
+
+local function setupMineIndex()
+
+    local folder =
+        MiningServiceClient.mineFolder
+
+
+    if not folder then
+        return false
+    end
+
+
+    --------------------------------------------------
+    -- SAME FOLDER ALREADY INDEXED
+    --------------------------------------------------
+
+    if IndexedFolder == folder then
+        return true
+    end
+
+
+    --------------------------------------------------
+    -- RESET
+    --------------------------------------------------
+
+    clearFolderConnections()
+
+    clearBlockIndex()
+
+
+    IndexedFolder =
+        folder
+
+
+    --------------------------------------------------
+    -- INITIAL SCAN
+    --------------------------------------------------
+
+    for _, block in ipairs(
+        folder:GetChildren()
+    ) do
+
+        registerBlock(block)
+
+    end
+
+
+    --------------------------------------------------
+    -- NEW BLOCKS
+    --------------------------------------------------
+
+    table.insert(
+        FolderConnections,
+
+        folder.ChildAdded:Connect(
+            function(block)
+
+                registerBlock(block)
+
+            end
+        )
+
+    )
+
+
+    --------------------------------------------------
+    -- REMOVED BLOCKS
+    --------------------------------------------------
+
+    table.insert(
+        FolderConnections,
+
+        folder.ChildRemoved:Connect(
+            function(block)
+
+                unregisterBlock(block)
+
+            end
+        )
+
+    )
+
+
+    return true
 
 end
 
@@ -198,36 +609,135 @@ local function damageBlock(block)
         return false
     end
 
+
     if not block.Parent then
         return false
     end
 
-    if not block:GetAttribute("isBlock") then
+
+    if not block:GetAttribute(
+        "isBlock"
+    ) then
+
         return false
+
     end
+
 
     if not isAllowedDepth(block) then
         return false
     end
 
+
     local info =
         getBlockInfo(block)
+
 
     if not info then
         return false
     end
 
-    -- NEVER mine Bedrock
+
+    --------------------------------------------------
+    -- NEVER MINE BEDROCK
+    --------------------------------------------------
 
     if isBedrock(info) then
         return false
     end
 
-    MiningServiceClient.currentBlock = block
+
+    --------------------------------------------------
+    -- DAMAGE
+    --------------------------------------------------
+
+    MiningServiceClient.currentBlock =
+        block
+
 
     MiningServiceClient:damageBlock()
 
+
     return true
+
+end
+
+
+--------------------------------------------------
+-- FAST BLOCK MINING
+--------------------------------------------------
+
+local function mineBlockFast(
+    block,
+    checkFunction,
+    runId
+)
+
+    if not block then
+        return
+    end
+
+
+    while
+        block.Parent
+        and isCurrentRun(runId)
+    do
+
+
+        --------------------------------------------------
+        -- CHECK TYPE
+        --------------------------------------------------
+
+        local info =
+            getBlockInfo(block)
+
+
+        if not info then
+            break
+        end
+
+
+        if isBedrock(info) then
+            break
+        end
+
+
+        if not checkFunction(info) then
+            break
+        end
+
+
+        --------------------------------------------------
+        -- DAMAGE BURST
+        --------------------------------------------------
+
+        for i = 1, DAMAGE_BURST do
+
+
+            if not block.Parent then
+                break
+            end
+
+
+            if not isCurrentRun(runId) then
+                break
+            end
+
+
+            if not damageBlock(block) then
+                break
+            end
+
+        end
+
+
+        --------------------------------------------------
+        -- ONE YIELD PER BURST
+        --------------------------------------------------
+
+        task.wait()
+
+    end
 
 end
 
@@ -236,34 +746,16 @@ end
 -- MINE SELECTED ORE
 --------------------------------------------------
 
-local function mineSelectedOre(block)
+local function mineSelectedOre(
+    block,
+    runId
+)
 
-    if not block then
-        return
-    end
-
-    while block.Parent and AutoMine do
-
-        local info =
-            getBlockInfo(block)
-
-        if not info then
-            break
-        end
-
-        if isBedrock(info) then
-            break
-        end
-
-        if not isSelectedOre(info) then
-            break
-        end
-
-        damageBlock(block)
-
-        task.wait()
-
-    end
+    mineBlockFast(
+        block,
+        isSelectedOre,
+        runId
+    )
 
 end
 
@@ -272,166 +764,87 @@ end
 -- MINE STONE
 --------------------------------------------------
 
-local function mineStone(block)
+local function mineStone(
+    block,
+    runId
+)
 
-    if not block then
-        return
-    end
-
-    while block.Parent and AutoMine do
-
-        local info =
-            getBlockInfo(block)
-
-        if not info then
-            break
-        end
-
-        if isBedrock(info) then
-            break
-        end
-
-        if not isStone(info) then
-            break
-        end
-
-        damageBlock(block)
-
-        task.wait()
-
-    end
+    mineBlockFast(
+        block,
+        isStone,
+        runId
+    )
 
 end
 
 
 --------------------------------------------------
--- GET ALL BLOCKS AT Y
+-- MINE Y LEVEL
 --------------------------------------------------
 
-local function getBlocksAtY(targetY)
+local function mineLevel(
+    y,
+    runId
+)
 
-    if not MiningServiceClient.mineFolder then
-        return {}
+    if not isCurrentRun(runId) then
+        return
     end
+
+
+    local level =
+        BlocksByY[y]
+
+
+    if not level then
+        return
+    end
+
+
+    --------------------------------------------------
+    -- SNAPSHOT
+    --------------------------------------------------
+
+    -- Wir kopieren nur die aktuelle Y-Ebene,
+    -- nicht die komplette Mine.
 
     local blocks = {}
 
-    for _, block in ipairs(
-        MiningServiceClient.mineFolder:GetChildren()
-    ) do
 
-        if block.Parent then
+    for block in pairs(level) do
 
-            local blockY =
-                getBlockY(block)
-
-            if blockY == targetY then
-
-                table.insert(
-                    blocks,
-                    block
-                )
-
-            end
-
-        end
+        table.insert(
+            blocks,
+            block
+        )
 
     end
 
-    return blocks
-
-end
-
-
---------------------------------------------------
--- FIND SELECTED ORE
---------------------------------------------------
-
-local function findSelectedOre(y)
-
-    if not MiningServiceClient.mineFolder then
-        return nil
-    end
-
-    local ores = {}
-
-    for _, block in ipairs(
-        MiningServiceClient.mineFolder:GetChildren()
-    ) do
-
-        if block.Parent then
-
-            local blockY =
-                getBlockY(block)
-
-            if blockY
-                and blockY >= MIN_DEPTH
-                and blockY <= y then
-
-                local info =
-                    getBlockInfo(block)
-
-                if info
-                    and isSelectedOre(info) then
-
-                    table.insert(
-                        ores,
-                        block
-                    )
-
-                end
-
-            end
-
-        end
-
-    end
-
-    if #ores > 0 then
-
-        return ores[
-            math.random(
-                1,
-                #ores
-            )
-        ]
-
-    end
-
-    return nil
-
-end
-
-
---------------------------------------------------
--- MINE COMPLETE Y LEVEL
---------------------------------------------------
-
-local function mineLevel(y)
-
-    if not AutoMine then
-        return
-    end
 
     --------------------------------------------------
-    -- GET EVERY EXISTING BLOCK ON THIS Y LEVEL
+    -- PROCESS LEVEL
     --------------------------------------------------
 
-    local levelBlocks =
-        getBlocksAtY(y)
+    for _, block in ipairs(
+        blocks
+    ) do
 
-    for _, block in ipairs(levelBlocks) do
 
-        if not AutoMine then
+        if not isCurrentRun(runId) then
             return
         end
 
-        if block and block.Parent then
+
+        if block
+            and block.Parent then
+
 
             local info =
                 getBlockInfo(block)
 
+
             if info then
+
 
                 --------------------------------------------------
                 -- SELECTED ORE
@@ -440,8 +853,10 @@ local function mineLevel(y)
                 if isSelectedOre(info) then
 
                     mineSelectedOre(
-                        block
+                        block,
+                        runId
                     )
+
 
                 --------------------------------------------------
                 -- STONE
@@ -450,8 +865,10 @@ local function mineLevel(y)
                 elseif isStone(info) then
 
                     mineStone(
-                        block
+                        block,
+                        runId
                     )
+
 
                 --------------------------------------------------
                 -- BEDROCK
@@ -459,8 +876,8 @@ local function mineLevel(y)
 
                 elseif isBedrock(info) then
 
-                    -- Skip Bedrock.
-                    -- Do not stop the whole miner.
+                    -- Skip
+
 
                 --------------------------------------------------
                 -- UNSELECTED ORE
@@ -468,7 +885,7 @@ local function mineLevel(y)
 
                 else
 
-                    -- Skip ores that were not selected.
+                    -- Skip
 
                 end
 
@@ -482,52 +899,52 @@ end
 
 
 --------------------------------------------------
--- MINE DOWN TO -4999
+-- MINE DOWN
 --------------------------------------------------
 
-local function mineDownToBottom()
+local function mineDownToBottom(
+    runId
+)
 
     for y = 0, MIN_DEPTH, -1 do
 
-        if not AutoMine then
+
+        if not isCurrentRun(runId) then
             return
         end
 
 
         --------------------------------------------------
-        -- SELECTED ORE FIRST
+        -- CHECK IF MINE FOLDER CHANGED
         --------------------------------------------------
 
-        local ore =
-            findSelectedOre(y)
+        if MiningServiceClient.mineFolder
+            ~= IndexedFolder then
 
-        if ore then
-
-            mineSelectedOre(
-                ore
-            )
+            setupMineIndex()
 
         end
 
 
-        if not AutoMine then
-            return
-        end
+        --------------------------------------------------
+        -- MINE THIS COMPLETE LEVEL
+        --------------------------------------------------
+
+        mineLevel(
+            y,
+            runId
+        )
 
 
         --------------------------------------------------
-        -- MINE ALL X / Z POSITIONS ON THIS Y LEVEL
+        -- SMALL YIELD BETWEEN LEVELS
         --------------------------------------------------
 
-        mineLevel(y)
+        if y % 25 == 0 then
 
+            task.wait()
 
-        if not AutoMine then
-            return
         end
-
-        -- Small yield so huge mines don't freeze everything.
-        task.wait()
 
     end
 
@@ -535,62 +952,101 @@ end
 
 
 --------------------------------------------------
--- RANDOM SELECTED ORES
+-- GET NEXT SELECTED ORE
 --------------------------------------------------
 
-local function randomOreMining()
+local function getNextSelectedOre()
 
-    while AutoMine do
+    for block in pairs(
+        SelectedOreBlocks
+    ) do
 
-        local ores = {}
 
-        if MiningServiceClient.mineFolder then
+        --------------------------------------------------
+        -- CLEAN DEAD BLOCK
+        --------------------------------------------------
 
-            for _, block in ipairs(
-                MiningServiceClient.mineFolder:GetChildren()
-            ) do
+        if not block
+            or not block.Parent then
 
-                if block.Parent then
+            SelectedOreBlocks[block] =
+                nil
 
-                    local y =
-                        getBlockY(block)
 
-                    if y and y >= MIN_DEPTH then
+        else
 
-                        local info =
-                            getBlockInfo(block)
 
-                        if info
-                            and isSelectedOre(info) then
+            local info =
+                getBlockInfo(block)
 
-                            table.insert(
-                                ores,
-                                block
-                            )
 
-                        end
+            --------------------------------------------------
+            -- NO LONGER SELECTED
+            --------------------------------------------------
 
-                    end
+            if not info
+                or not isSelectedOre(info) then
 
-                end
+                SelectedOreBlocks[block] =
+                    nil
+
+
+            --------------------------------------------------
+            -- VALID ORE
+            --------------------------------------------------
+
+            else
+
+                return block
 
             end
 
         end
 
+    end
 
-        if #ores > 0 then
 
-            local target =
-                ores[
-                    math.random(
-                        1,
-                        #ores
-                    )
-                ]
+    return nil
+
+end
+
+
+--------------------------------------------------
+-- SELECTED ORE MINING AFTER BOTTOM
+--------------------------------------------------
+
+local function selectedOreMining(
+    runId
+)
+
+    while isCurrentRun(runId) do
+
+
+        --------------------------------------------------
+        -- MINE FOLDER CHANGED?
+        --------------------------------------------------
+
+        if MiningServiceClient.mineFolder
+            ~= IndexedFolder then
+
+            setupMineIndex()
+
+        end
+
+
+        --------------------------------------------------
+        -- GET CACHED ORE
+        --------------------------------------------------
+
+        local target =
+            getNextSelectedOre()
+
+
+        if target then
 
             mineSelectedOre(
-                target
+                target,
+                runId
             )
 
         else
@@ -605,17 +1061,64 @@ end
 
 
 --------------------------------------------------
--- START
+-- START MINING
 --------------------------------------------------
 
-local function startMining()
+local function startMining(
+    runId
+)
 
     task.spawn(function()
 
-        mineDownToBottom()
 
-        if AutoMine then
-            randomOreMining()
+        --------------------------------------------------
+        -- WAIT FOR MINE FOLDER
+        --------------------------------------------------
+
+        while isCurrentRun(runId) do
+
+
+            if setupMineIndex() then
+                break
+            end
+
+
+            task.wait(0.1)
+
+        end
+
+
+        if not isCurrentRun(runId) then
+            return
+        end
+
+
+        --------------------------------------------------
+        -- REFRESH ORE CACHE
+        --------------------------------------------------
+
+        rebuildSelectedOreCache()
+
+
+        --------------------------------------------------
+        -- MINE ALL LEVELS
+        --------------------------------------------------
+
+        mineDownToBottom(
+            runId
+        )
+
+
+        --------------------------------------------------
+        -- KEEP MINING SELECTED ORES
+        --------------------------------------------------
+
+        if isCurrentRun(runId) then
+
+            selectedOreMining(
+                runId
+            )
+
         end
 
     end)
@@ -629,13 +1132,27 @@ end
 
 local OreValues = {}
 
-for id, data in pairs(BlocksData) do
+
+for id, data in pairs(
+    BlocksData
+) do
+
 
     if id
-        and not string.match(id, "^StoneOre%d*$")
-        and id ~= "Bedrock" then
 
-        local displayName = id
+        and not string.match(
+            id,
+            "^StoneOre%d*$"
+        )
+
+        and id ~= "Bedrock"
+
+    then
+
+
+        local displayName =
+            id
+
 
         if type(data) == "table" then
 
@@ -645,6 +1162,7 @@ for id, data in pairs(BlocksData) do
                 or id
 
         end
+
 
         table.insert(
             OreValues,
@@ -656,22 +1174,35 @@ for id, data in pairs(BlocksData) do
 end
 
 
-table.sort(OreValues)
+table.sort(
+    OreValues
+)
 
 
 --------------------------------------------------
--- CREATE DROPDOWN
+-- ORE DROPDOWN
 --------------------------------------------------
 
 local MultiDropdown =
     Tabs.Main:AddDropdown(
         "OreSelection",
         {
-            Title = "Select Ores",
-            Description = "Choose which ores to mine.",
-            Values = OreValues,
-            Multi = true,
-            Default = {}
+
+            Title =
+                "Select Ores",
+
+            Description =
+                "Choose which ores to mine.",
+
+            Values =
+                OreValues,
+
+            Multi =
+                true,
+
+            Default =
+                {}
+
         }
     )
 
@@ -680,34 +1211,52 @@ local MultiDropdown =
 -- UPDATE SELECTED ORES
 --------------------------------------------------
 
-MultiDropdown:OnChanged(function(values)
+MultiDropdown:OnChanged(
+    function(values)
 
-    SelectedOres = {}
 
-    for name, enabled in pairs(values) do
+        SelectedOres = {}
 
-        if enabled then
 
-            -- Try to find matching ID
+        for name, enabled in pairs(
+            values
+        ) do
 
-            for id, data in pairs(BlocksData) do
 
-                local displayName = id
+            if enabled then
 
-                if type(data) == "table" then
 
-                    displayName =
-                        data.name
-                        or data.Name
-                        or id
+                for id, data in pairs(
+                    BlocksData
+                ) do
 
-                end
 
-                if displayName == name then
+                    local displayName =
+                        id
 
-                    SelectedOres[id] = true
 
-                    break
+                    if type(data)
+                        == "table" then
+
+                        displayName =
+                            data.name
+                            or data.Name
+                            or id
+
+                    end
+
+
+                    if displayName
+                        == name then
+
+
+                        SelectedOres[id] =
+                            true
+
+
+                        break
+
+                    end
 
                 end
 
@@ -715,9 +1264,15 @@ MultiDropdown:OnChanged(function(values)
 
         end
 
-    end
 
-end)
+        --------------------------------------------------
+        -- UPDATE FAST CACHE
+        --------------------------------------------------
+
+        rebuildSelectedOreCache()
+
+    end
+)
 
 
 --------------------------------------------------
@@ -728,53 +1283,117 @@ local Toggle =
     Tabs.Main:AddToggle(
         "AutoMine",
         {
-            Title = "Auto Mine",
-            Description = "Mine all loaded levels and selected ores to -4999.",
-            Default = false
+
+            Title =
+                "Auto Mine",
+
+            Description =
+                "Fast mine all levels to -4999.",
+
+            Default =
+                false
+
         }
     )
 
 
-Toggle:OnChanged(function(value)
+--------------------------------------------------
+-- TOGGLE CHANGED
+--------------------------------------------------
 
-    AutoMine = value
+Toggle:OnChanged(
+    function(value)
 
-    if AutoMine then
 
-        Fluent:Notify({
-            Title = "Auto Mine",
-            Content = "Mining all levels to -4999.",
-            Duration = 2
-        })
+        --------------------------------------------------
+        -- INVALIDATE OLD THREAD
+        --------------------------------------------------
 
-        startMining()
+        MiningRunId =
+            MiningRunId + 1
 
-    else
 
-        Fluent:Notify({
-            Title = "Auto Mine",
-            Content = "Mining stopped.",
-            Duration = 2
-        })
+        AutoMine =
+            value
+
+
+        --------------------------------------------------
+        -- START
+        --------------------------------------------------
+
+        if AutoMine then
+
+
+            local runId =
+                MiningRunId
+
+
+            Fluent:Notify({
+                Title =
+                    "Fast Auto Mine",
+
+                Content =
+                    "Fast mining started.",
+
+                Duration =
+                    2
+            })
+
+
+            startMining(
+                runId
+            )
+
+
+        --------------------------------------------------
+        -- STOP
+        --------------------------------------------------
+
+        else
+
+
+            Fluent:Notify({
+                Title =
+                    "Fast Auto Mine",
+
+                Content =
+                    "Mining stopped.",
+
+                Duration =
+                    2
+            })
+
+        end
 
     end
-
-end)
+)
 
 
 --------------------------------------------------
 -- SETTINGS
 --------------------------------------------------
 
-SaveManager:SetLibrary(Fluent)
-InterfaceManager:SetLibrary(Fluent)
+SaveManager:SetLibrary(
+    Fluent
+)
+
+InterfaceManager:SetLibrary(
+    Fluent
+)
+
 
 InterfaceManager:BuildInterfaceSection(
     Tabs.Settings
 )
 
+
 SaveManager:BuildConfigSection(
     Tabs.Settings
 )
+
+
+--------------------------------------------------
+-- DEFAULT TAB
+--------------------------------------------------
 
 Window:SelectTab(1)
