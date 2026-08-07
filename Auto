@@ -86,7 +86,7 @@ local MIN_DEPTH = -4999
 -- Falls es Probleme gibt:
 -- 5 -> 3 -> 2 -> 1
 
-local DAMAGE_BURST = 5
+local DAMAGE_BURST = 100
 
 
 --------------------------------------------------
