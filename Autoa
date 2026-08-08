@@ -154,36 +154,41 @@ local function getCoordinatesFromName(name)
         return nil, nil, nil
     end
 
-
     --------------------------------------------------
-    -- USE GAME'S OWN FUNCTION FIRST
+    -- GAME FUNCTION
     --------------------------------------------------
 
-    local success,
-        x,
-        y,
-        z =
-
+    local success, x, y, z =
         pcall(function()
 
-            return
-                MiningInfo:
+            return MiningInfo:
                 getCoordinatesFromBlockName(
                     name
                 )
 
         end)
 
-
     if success
         and x ~= nil
         and y ~= nil
         and z ~= nil then
 
-        return
-            x,
-            y,
-            z
+        --------------------------------------------------
+        -- IMPORTANT:
+        -- FORCE EVERYTHING TO NUMBER
+        --------------------------------------------------
+
+        x = tonumber(x)
+        y = tonumber(y)
+        z = tonumber(z)
+
+        if x ~= nil
+            and y ~= nil
+            and z ~= nil then
+
+            return x, y, z
+
+        end
 
     end
 
@@ -192,15 +197,11 @@ local function getCoordinatesFromName(name)
     -- FALLBACK
     --------------------------------------------------
 
-    local sx,
-        sy,
-        sz =
-
+    local sx, sy, sz =
         string.match(
-            name,
+            tostring(name),
             "^(-?%d+)_(-?%d+)_(-?%d+)$"
         )
-
 
     return
         tonumber(sx),
@@ -208,7 +209,6 @@ local function getCoordinatesFromName(name)
         tonumber(sz)
 
 end
-
 
 --------------------------------------------------
 -- GET Y
@@ -386,9 +386,14 @@ end
 
 local function validDepth(y)
 
+    y = tonumber(y)
+
+    if y == nil then
+        return false
+    end
+
     return
-        y ~= nil
-        and y <= 0
+        y <= 0
         and y >= MIN_DEPTH
 
 end
@@ -400,9 +405,14 @@ end
 
 local function inFarmDepth(y)
 
+    y = tonumber(y)
+
+    if y == nil then
+        return false
+    end
+
     return
-        y ~= nil
-        and y <= START_DEPTH
+        y <= START_DEPTH
         and y >= MIN_DEPTH
 
 end
