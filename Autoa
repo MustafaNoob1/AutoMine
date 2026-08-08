@@ -1,4 +1,4 @@
-warn("[SmartOreMiner] FINAL FIX V2 loaded")
+warn("[SmartOreMiner] SMART V3 loaded")
 
 -- Smart Ore Miner
 -- Features:
@@ -13,6 +13,14 @@ warn("[SmartOreMiner] FINAL FIX V2 loaded")
 --  * Auto mine reset + repeat
 --  * Stop conditions
 --  * Sweep modes
+--  * Smart Priority scoring
+--  * Auto Best Depth / Deepest Unlocked / Rarest Layer
+--  * Smart Rank Grind
+--  * Smart early reset when yield drops
+--  * Value/hour + blocks/min + ores/min
+--  * Systematic snake-style layer sweep
+--  * Auto resume after respawn / mine recreation
+--  * Farm profiles (Max Money / Rare Hunt / Rank Grind / Full Clear / Low Movement)
 
 --------------------------------------------------
 -- LIBRARIES
@@ -34,7 +42,7 @@ local InterfaceManager = loadstring(game:HttpGet(
 --------------------------------------------------
 local Window = Fluent:CreateWindow({
     Title = "Fluent " .. Fluent.Version,
-    SubTitle = "Smart Ore Miner",
+    SubTitle = "Smart Ore Miner V3",
     TabWidth = 160,
     Size = UDim2.fromOffset(650, 590),
     Acrylic = true,
@@ -84,14 +92,26 @@ local DEFAULT_X = 9
 local DEFAULT_Z = 9
 local STALL_LIMIT = 8
 
-local PRIORITY_MODE = "Highest Value"
+local PRIORITY_MODE = "Smart"
 local SWEEP_MODE = "Full Layer"
+
+-- Smart automation. Manual keeps the exact Start / End inputs.
+local FARM_PROFILE = "Custom"
+local AUTO_DEPTH_MODE = "Manual"
+local SMART_RANK_GRIND = false
+local SYSTEMATIC_SWEEP = true
+local AUTO_RESUME = true
 
 local RARE_ALERT_ENABLED = true
 local RARE_PRIORITY_OVERRIDE = true
 local RARE_WEIGHT_THRESHOLD = 0.005
 
 local AUTO_RESET_MINE = false
+local SMART_RESET = false
+local SMART_RESET_PROGRESS = 0.85
+local SMART_RESET_IDLE_SECONDS = 25
+local SMART_RESET_MIN_BLOCKS = 60
+local SMART_RESET_MAX_CYCLE_SECONDS = 240
 
 local STOP_AFTER_MINUTES_ENABLED = false
 local STOP_AFTER_MINUTES = 30
@@ -105,6 +125,14 @@ local RunId = 0
 local BlockedTargets = {}
 local AlertedRareBlocks = {}
 local IsResetting = false
+local ApplyingProfile = false
+local AutoResumePending = false
+local LastObservedMineFolder = nil
+
+local CycleStartTime = nil
+local CycleStartBlocks = 0
+local CycleStartOres = 0
+local LastOreMinedAt = nil
 
 local AutoMineToggle = nil
 local InternalToggleChange = false
@@ -125,7 +153,10 @@ local Stats = {
     CurrentTargetId = nil,
     CurrentTargetValue = 0,
     CurrentTargetDepth = nil,
-    CurrentSweepY = nil
+    CurrentSweepY = nil,
+    BestAutoDepth = nil,
+    BestAutoDepthScore = 0,
+    LastResetReason = "-"
 }
 
 local CycleMinedByDepth = {}
@@ -143,6 +174,15 @@ local updateProgressDisplay = nil
 local refreshOreDropdownForRange = nil
 local SuppressOreDropdownCallback = false
 local VisibleOreDisplayNames = {}
+local ProfileDropdown = nil
+local AutoDepthDropdown = nil
+local PriorityDropdown = nil
+local SweepDropdown = nil
+local AutoResetToggle = nil
+local SmartResetToggle = nil
+local SystematicSweepToggle = nil
+local AutoResumeToggle = nil
+local SmartRankToggle = nil
 
 --------------------------------------------------
 -- HELPERS
@@ -491,6 +531,152 @@ local function isRareOre(info, y)
     return getRarityWeight(info.Id, y) <= RARE_WEIGHT_THRESHOLD
 end
 
+
+--------------------------------------------------
+-- SMART DEPTH ANALYSIS
+--------------------------------------------------
+local function getBlockValueById(id)
+    local success, info = pcall(function()
+        return MiningInfo:getBlock(tostring(id))
+    end)
+
+    if not success or not info then
+        return 0
+    end
+
+    return getComparableValue(info.value)
+end
+
+local function getLayerProfitScore(layer)
+    if not layer then
+        return 0
+    end
+
+    local score = 0
+    for _, entry in pairs(layer.blocks or {}) do
+        local id = tostring(entry.block or "")
+        local weight = safeNumber(entry.weight)
+
+        if isRealOreId(id) and weight and weight > 0 then
+            local value = getBlockValueById(id)
+            if value > 0 then
+                -- Log value keeps huge-number ores stable while still rewarding value.
+                local valuePower = math.log(value + 1) / math.log(10)
+                score = score + (valuePower * weight)
+            end
+        end
+    end
+
+    return score
+end
+
+local function getLayerRarestWeight(layer)
+    if not layer then
+        return math.huge
+    end
+
+    local best = math.huge
+    for _, entry in pairs(layer.blocks or {}) do
+        local id = tostring(entry.block or "")
+        local weight = safeNumber(entry.weight)
+        if isRealOreId(id) and weight and weight > 0 and weight < best then
+            best = weight
+        end
+    end
+    return best
+end
+
+local function getAutoDepthCandidate(mode)
+    mode = tostring(mode or AUTO_DEPTH_MODE)
+
+    if mode == "Manual" then
+        return nil, nil, nil
+    end
+
+    local rank = getRankDepthInfo()
+    if not rank then
+        return nil, nil, nil
+    end
+
+    if mode == "Deepest Unlocked" then
+        return RANK_MAX_DEPTH, math.huge, rank.Layers
+    end
+
+    local layers = MiningInfo._layers or {}
+    local bestY = nil
+    local bestScore = nil
+    local bestIndex = nil
+
+    for index = 1, math.min(rank.Layers or 0, #layers) do
+        local layer = layers[index]
+        local depth = safeNumber(layer and layer.depth)
+
+        if depth ~= nil and depth <= math.abs(RANK_MAX_DEPTH) then
+            local y = -depth
+            y = math.max(y, RANK_MAX_DEPTH)
+
+            if mode == "Rarest Layer" then
+                local rarity = getLayerRarestWeight(layer)
+                local profit = getLayerProfitScore(layer)
+                local score = rarity < math.huge and (1 / math.max(rarity, 1e-12)) or 0
+                score = score + (profit * 0.000001)
+
+                if bestScore == nil or score > bestScore then
+                    bestScore = score
+                    bestY = y
+                    bestIndex = index
+                end
+            else
+                -- Best Profit
+                local score = getLayerProfitScore(layer)
+                if bestScore == nil or score > bestScore or (score == bestScore and y < bestY) then
+                    bestScore = score
+                    bestY = y
+                    bestIndex = index
+                end
+            end
+        end
+    end
+
+    return bestY, bestScore, bestIndex
+end
+
+local function applyAutomaticDepth(showNotification)
+    local mode = AUTO_DEPTH_MODE
+
+    if SMART_RANK_GRIND and mode == "Manual" then
+        mode = "Deepest Unlocked"
+    end
+
+    if mode == "Manual" then
+        Stats.BestAutoDepth = nil
+        Stats.BestAutoDepthScore = 0
+        return false
+    end
+
+    local depth, score = getAutoDepthCandidate(mode)
+    depth = safeNumber(depth)
+
+    if depth == nil then
+        return false
+    end
+
+    START_DEPTH = math.clamp(math.round(depth), MIN_DEPTH, 0)
+    END_DEPTH = START_DEPTH
+    Stats.BestAutoDepth = START_DEPTH
+    Stats.BestAutoDepthScore = safeNumber(score) or 0
+
+    if showNotification then
+        Fluent:Notify({
+            Title = "Smart Depth",
+            Content = tostring(mode) .. " -> " .. tostring(START_DEPTH),
+            Duration = 3
+        })
+    end
+
+    return true
+end
+
 --------------------------------------------------
 -- ORE DISPLAY MAPS
 --------------------------------------------------
@@ -663,8 +849,15 @@ local function resetSessionStats()
     Stats.CurrentTargetValue = 0
     Stats.CurrentTargetDepth = nil
     Stats.CurrentSweepY = nil
+    Stats.BestAutoDepth = nil
+    Stats.BestAutoDepthScore = 0
+    Stats.LastResetReason = "-"
     CycleMinedByDepth = {}
     AlertedRareBlocks = {}
+    CycleStartTime = os.clock()
+    CycleStartBlocks = 0
+    CycleStartOres = 0
+    LastOreMinedAt = os.clock()
 end
 
 local function requestStop(reason)
@@ -1051,6 +1244,63 @@ local function pickNearest(bucket, targetX, targetZ)
     return bestName
 end
 
+
+local function pickSystematic(bucket, targetX, targetZ)
+    if not bucket then
+        return nil
+    end
+
+    targetX = safeNumber(targetX) or DEFAULT_X
+    targetZ = safeNumber(targetZ) or DEFAULT_Z
+
+    local best = nil
+
+    for name in pairs(bucket) do
+        if not BlockedTargets[name] then
+            local model = ModelsByName[name]
+            local y = safeNumber(YByName[name])
+
+            if model and model.Parent and validDepth(y) then
+                local x, _, z = getCoordinatesFromName(name)
+                x = safeNumber(x)
+                z = safeNumber(z)
+
+                if x ~= nil and z ~= nil then
+                    local rowDistance = math.abs(z - targetZ)
+                    local direction = (math.abs(z) % 2 == 0) and 1 or -1
+                    local xKey = direction == 1 and x or -x
+                    local distance = ((x - targetX) ^ 2) + ((z - targetZ) ^ 2)
+
+                    local candidate = {
+                        Name = name,
+                        RowDistance = rowDistance,
+                        Z = z,
+                        XKey = xKey,
+                        Distance = distance
+                    }
+
+                    if best == nil
+                        or candidate.RowDistance < best.RowDistance
+                        or (candidate.RowDistance == best.RowDistance and candidate.Z < best.Z)
+                        or (candidate.RowDistance == best.RowDistance and candidate.Z == best.Z and candidate.XKey < best.XKey)
+                        or (candidate.RowDistance == best.RowDistance and candidate.Z == best.Z and candidate.XKey == best.XKey and candidate.Distance < best.Distance) then
+                        best = candidate
+                    end
+                end
+            end
+        end
+    end
+
+    return best and best.Name or nil
+end
+
+local function pickSweepTarget(bucket, targetX, targetZ)
+    if SYSTEMATIC_SWEEP then
+        return pickSystematic(bucket, targetX, targetZ)
+    end
+    return pickNearest(bucket, targetX, targetZ)
+end
+
 local function getModelPosition(model)
     if not model then
         return nil
@@ -1240,6 +1490,7 @@ local function recordMined(info, y)
     if info and not isStone(info) and not isBedrock(info) then
         Stats.OresMined = Stats.OresMined + 1
         Stats.EstimatedValue = Stats.EstimatedValue + getComparableValue(info.Value)
+        LastOreMinedAt = os.clock()
     end
 
     checkStopConditions()
@@ -1386,6 +1637,16 @@ local function candidateBeatsBest(candidate, best)
         end
     end
 
+    if PRIORITY_MODE == "Smart" then
+        if candidate.SmartScore ~= best.SmartScore then
+            return candidate.SmartScore > best.SmartScore
+        end
+        if candidate.Value ~= best.Value then
+            return candidate.Value > best.Value
+        end
+        return candidate.Distance < best.Distance
+    end
+
     if PRIORITY_MODE == "Rarest First" then
         if candidate.Weight ~= best.Weight then
             return candidate.Weight < best.Weight
@@ -1438,12 +1699,27 @@ local function getSelectedTarget(anchorX, anchorZ)
                             local weight = getRarityWeight(info.Id, y)
                             local score = value / (distance + 1)
 
+                            local rarityPower = 0
+                            if weight < math.huge and weight > 0 then
+                                rarityPower = math.max(0, -(math.log(weight) / math.log(10)))
+                            end
+
+                            local valuePower = 0
+                            if value > 0 then
+                                valuePower = math.log(value + 1) / math.log(10)
+                            end
+
+                            -- Smart score balances value, rarity and travel distance.
+                            local smartScore = ((valuePower * 2) + (rarityPower * 3))
+                                / (1 + (distance / 25))
+
                             local candidate = {
                                 Name = name,
                                 Value = value,
                                 Distance = distanceSquared,
                                 Weight = weight,
                                 Score = score,
+                                SmartScore = smartScore,
                                 IsRare = isRareOre(info, y)
                             }
 
@@ -1513,7 +1789,7 @@ local function getFullSweepTarget(anchorX, anchorZ)
         return nil, nil
     end
 
-    return pickNearest(NonBedrockByY[selectedY], anchorX, anchorZ), selectedY
+    return pickSweepTarget(NonBedrockByY[selectedY], anchorX, anchorZ), selectedY
 end
 
 local function getRevealTarget(anchorX, anchorZ)
@@ -1522,7 +1798,7 @@ local function getRevealTarget(anchorX, anchorZ)
     local selectedY = getHighestSweepY(StoneByY)
 
     if selectedY ~= nil then
-        local target = pickNearest(StoneByY[selectedY], anchorX, anchorZ)
+        local target = pickSweepTarget(StoneByY[selectedY], anchorX, anchorZ)
         if target then
             return target, selectedY
         end
@@ -1533,7 +1809,7 @@ local function getRevealTarget(anchorX, anchorZ)
         return nil, nil
     end
 
-    return pickNearest(NonBedrockByY[selectedY], anchorX, anchorZ), selectedY
+    return pickSweepTarget(NonBedrockByY[selectedY], anchorX, anchorZ), selectedY
 end
 
 --------------------------------------------------
@@ -1576,6 +1852,40 @@ local function countRemainingInRange()
         end
     end
     return total
+end
+
+
+local function getCycleProgress()
+    local cycleMined = math.max(0, Stats.BlocksMined - (CycleStartBlocks or 0))
+    local remaining = countRemainingInRange()
+    local knownTotal = cycleMined + remaining
+    local progress = knownTotal > 0 and (cycleMined / knownTotal) or 0
+    return progress, cycleMined, remaining
+end
+
+local function shouldSmartReset()
+    if not SMART_RESET or not AUTO_RESET_MINE or IsResetting then
+        return false, nil
+    end
+
+    local now = os.clock()
+    local runtime = CycleStartTime and (now - CycleStartTime) or 0
+    local oreIdle = LastOreMinedAt and (now - LastOreMinedAt) or runtime
+    local progress, cycleMined = getCycleProgress()
+
+    if cycleMined < SMART_RESET_MIN_BLOCKS then
+        return false, nil
+    end
+
+    if progress >= SMART_RESET_PROGRESS and oreIdle >= SMART_RESET_IDLE_SECONDS then
+        return true, string.format("Smart reset: %.0f%% known clear, no ore for %.0fs", progress * 100, oreIdle)
+    end
+
+    if runtime >= SMART_RESET_MAX_CYCLE_SECONDS and oreIdle >= SMART_RESET_IDLE_SECONDS then
+        return true, string.format("Smart reset: cycle %.0fs, no ore for %.0fs", runtime, oreIdle)
+    end
+
+    return false, nil
 end
 
 --------------------------------------------------
@@ -1683,6 +1993,18 @@ local function farmingLoop(run, anchorX, anchorZ)
         local effectiveStart, effectiveEnd = getEffectiveDepthRange()
         rescanMine()
 
+        local smartResetNow, smartResetReason = shouldSmartReset()
+        if smartResetNow then
+            Stats.Status = "Smart reset"
+            Stats.LastResetReason = tostring(smartResetReason or "Smart reset")
+            Fluent:Notify({
+                Title = "Smart Reset",
+                Content = Stats.LastResetReason,
+                Duration = 3
+            })
+            return "reset"
+        end
+
         -- Priority 1: selected ore according to chosen priority mode.
         local target = getSelectedTarget(anchorX, anchorZ)
 
@@ -1753,6 +2075,7 @@ local function farmingLoop(run, anchorX, anchorZ)
                 end
 
                 if AUTO_RESET_MINE then
+                    Stats.LastResetReason = "Range complete"
                     return "reset"
                 end
 
@@ -1857,6 +2180,10 @@ local function requestMineReset(run)
     end
 
     Stats.Status = "Mine reset complete"
+    CycleStartTime = os.clock()
+    CycleStartBlocks = Stats.BlocksMined
+    CycleStartOres = Stats.OresMined
+    LastOreMinedAt = os.clock()
     return true
 end
 
@@ -1866,7 +2193,15 @@ end
 local function startMining(run)
     task.spawn(function()
         refreshRankDepth()
+        applyAutomaticDepth(false)
         BlockedTargets = {}
+
+        if refreshOreDropdownForRange then
+            refreshOreDropdownForRange()
+        end
+        if updateRankDisplay then
+            updateRankDisplay()
+        end
 
         if not waitForMine(run) then
             return
@@ -1876,6 +2211,10 @@ local function startMining(run)
             CycleMinedByDepth = {}
             BlockedTargets = {}
             Stats.CurrentSweepY = nil
+            CycleStartTime = os.clock()
+            CycleStartBlocks = Stats.BlocksMined
+            CycleStartOres = Stats.OresMined
+            LastOreMinedAt = LastOreMinedAt or os.clock()
 
             rebuildWholeIndex()
             rebuildSelectedIndex()
@@ -1934,6 +2273,152 @@ end
 
 table.sort(initialOreValues)
 VisibleOreDisplayNames = initialOreValues
+
+--------------------------------------------------
+-- SMART PROFILES / AUTO DEPTH
+--------------------------------------------------
+ProfileDropdown = Tabs.Main:AddDropdown("FarmProfile", {
+    Title = "Farm Profile",
+    Description = "Quick presets. Custom keeps your manual settings.",
+    Values = {
+        "Custom",
+        "Max Money",
+        "Rare Hunt",
+        "Rank Grind",
+        "Full Clear",
+        "Low Movement"
+    },
+    Multi = false,
+    Default = 1
+})
+
+local function applyFarmProfile(profile)
+    FARM_PROFILE = tostring(profile or "Custom")
+    ApplyingProfile = true
+
+    if FARM_PROFILE == "Max Money" then
+        PRIORITY_MODE = "Smart"
+        SWEEP_MODE = "Valuable Ores + Reveal"
+        AUTO_DEPTH_MODE = "Best Profit"
+        AUTO_RESET_MINE = true
+        SMART_RESET = true
+        SMART_RANK_GRIND = true
+        SYSTEMATIC_SWEEP = true
+        AUTO_RESUME = true
+        RARE_ALERT_ENABLED = true
+        RARE_PRIORITY_OVERRIDE = true
+    elseif FARM_PROFILE == "Rare Hunt" then
+        PRIORITY_MODE = "Rarest First"
+        SWEEP_MODE = "Valuable Ores + Reveal"
+        AUTO_DEPTH_MODE = "Rarest Layer"
+        AUTO_RESET_MINE = true
+        SMART_RESET = true
+        SMART_RANK_GRIND = true
+        SYSTEMATIC_SWEEP = true
+        AUTO_RESUME = true
+        RARE_ALERT_ENABLED = true
+        RARE_PRIORITY_OVERRIDE = true
+    elseif FARM_PROFILE == "Rank Grind" then
+        PRIORITY_MODE = "Smart"
+        SWEEP_MODE = "Full Layer"
+        AUTO_DEPTH_MODE = "Deepest Unlocked"
+        AUTO_RESET_MINE = true
+        SMART_RESET = false
+        SMART_RANK_GRIND = true
+        SYSTEMATIC_SWEEP = true
+        AUTO_RESUME = true
+    elseif FARM_PROFILE == "Full Clear" then
+        PRIORITY_MODE = "Highest Value"
+        SWEEP_MODE = "Full Layer"
+        AUTO_DEPTH_MODE = "Manual"
+        AUTO_RESET_MINE = false
+        SMART_RESET = false
+        SMART_RANK_GRIND = false
+        SYSTEMATIC_SWEEP = true
+        AUTO_RESUME = true
+    elseif FARM_PROFILE == "Low Movement" then
+        PRIORITY_MODE = "Nearest First"
+        SWEEP_MODE = "Valuable Ores + Reveal"
+        AUTO_DEPTH_MODE = "Manual"
+        AUTO_RESET_MINE = false
+        SMART_RESET = false
+        SMART_RANK_GRIND = false
+        SYSTEMATIC_SWEEP = true
+        AUTO_RESUME = true
+    end
+
+    refreshRankDepth()
+    applyAutomaticDepth(FARM_PROFILE ~= "Custom")
+
+    -- Keep the visible controls in sync with the selected profile.
+    pcall(function()
+        if PriorityDropdown then PriorityDropdown:SetValue(PRIORITY_MODE) end
+        if SweepDropdown then SweepDropdown:SetValue(SWEEP_MODE) end
+        if AutoDepthDropdown then AutoDepthDropdown:SetValue(AUTO_DEPTH_MODE) end
+        if AutoResetToggle then AutoResetToggle:SetValue(AUTO_RESET_MINE) end
+        if SmartResetToggle then SmartResetToggle:SetValue(SMART_RESET) end
+        if SystematicSweepToggle then SystematicSweepToggle:SetValue(SYSTEMATIC_SWEEP) end
+        if AutoResumeToggle then AutoResumeToggle:SetValue(AUTO_RESUME) end
+        if SmartRankToggle then SmartRankToggle:SetValue(SMART_RANK_GRIND) end
+    end)
+
+    if refreshOreDropdownForRange then
+        refreshOreDropdownForRange()
+    end
+    if updateRankDisplay then
+        updateRankDisplay()
+    end
+
+    ApplyingProfile = false
+
+    Fluent:Notify({
+        Title = "Farm Profile",
+        Content = FARM_PROFILE
+            .. " | " .. PRIORITY_MODE
+            .. " | " .. AUTO_DEPTH_MODE,
+        Duration = 3
+    })
+
+    restartActiveMiner()
+end
+
+ProfileDropdown:OnChanged(function(value)
+    if ApplyingProfile then
+        return
+    end
+    applyFarmProfile(value)
+end)
+
+AutoDepthDropdown = Tabs.Main:AddDropdown("AutoDepthMode", {
+    Title = "Auto Depth",
+    Description = "Automatically choose a one-layer farm depth within your rank.",
+    Values = {
+        "Manual",
+        "Best Profit",
+        "Deepest Unlocked",
+        "Rarest Layer"
+    },
+    Multi = false,
+    Default = 1
+})
+
+AutoDepthDropdown:OnChanged(function(value)
+    if ApplyingProfile then
+        return
+    end
+
+    AUTO_DEPTH_MODE = tostring(value)
+    if AUTO_DEPTH_MODE ~= "Manual" then
+        FARM_PROFILE = "Custom"
+        refreshRankDepth()
+        applyAutomaticDepth(true)
+        refreshOreDropdownForRange()
+        if updateRankDisplay then
+            updateRankDisplay()
+        end
+        restartActiveMiner()
+    end
+end)
 
 --------------------------------------------------
 -- MAIN UI: ORES
@@ -2000,10 +2485,11 @@ task.defer(function()
     SuppressOreDropdownCallback = false
 end)
 
-local PriorityDropdown = Tabs.Main:AddDropdown("PriorityMode", {
+PriorityDropdown = Tabs.Main:AddDropdown("PriorityMode", {
     Title = "Ore Priority",
     Description = "How selected ores are prioritized.",
     Values = {
+        "Smart",
         "Highest Value",
         "Rarest First",
         "Nearest First",
@@ -2014,10 +2500,14 @@ local PriorityDropdown = Tabs.Main:AddDropdown("PriorityMode", {
 })
 
 PriorityDropdown:OnChanged(function(value)
+    if ApplyingProfile then
+        return
+    end
     PRIORITY_MODE = tostring(value)
+    FARM_PROFILE = "Custom"
 end)
 
-local SweepDropdown = Tabs.Main:AddDropdown("SweepMode", {
+SweepDropdown = Tabs.Main:AddDropdown("SweepMode", {
     Title = "Sweep Mode",
     Description = "What happens after the target depth is reached.",
     Values = {
@@ -2030,7 +2520,11 @@ local SweepDropdown = Tabs.Main:AddDropdown("SweepMode", {
 })
 
 SweepDropdown:OnChanged(function(value)
+    if ApplyingProfile then
+        return
+    end
     SWEEP_MODE = tostring(value)
+    FARM_PROFILE = "Custom"
     restartActiveMiner()
 end)
 
@@ -2057,6 +2551,8 @@ Tabs.Main:AddInput("StartDepth", {
         end
 
         START_DEPTH = math.clamp(math.round(number), MIN_DEPTH, 0)
+        AUTO_DEPTH_MODE = "Manual"
+        FARM_PROFILE = "Custom"
         refreshRankDepth()
         refreshOreDropdownForRange()
 
@@ -2088,6 +2584,8 @@ Tabs.Main:AddInput("EndDepth", {
         end
 
         END_DEPTH = math.clamp(math.round(number), MIN_DEPTH, 0)
+        AUTO_DEPTH_MODE = "Manual"
+        FARM_PROFILE = "Custom"
         refreshRankDepth()
         refreshOreDropdownForRange()
 
@@ -2156,6 +2654,9 @@ updateRankDisplay = function()
         .. "\nSelected End: " .. tostring(END_DEPTH)
         .. "\nEffective Start: " .. tostring(effectiveStart)
         .. "\nEffective End: " .. tostring(effectiveEnd)
+        .. "\nProfile: " .. tostring(FARM_PROFILE)
+        .. "\nAuto Depth: " .. tostring(AUTO_DEPTH_MODE)
+        .. "\nPriority: " .. tostring(PRIORITY_MODE)
         .. "\nSweep: " .. tostring(SWEEP_MODE)
 
     if effectiveStart == effectiveEnd then
@@ -2192,7 +2693,7 @@ Tabs.Main:AddButton({
 --------------------------------------------------
 -- AUTOMATION UI: AUTO RESET
 --------------------------------------------------
-local AutoResetToggle = Tabs.Automation:AddToggle("AutoResetMine", {
+AutoResetToggle = Tabs.Automation:AddToggle("AutoResetMine", {
     Title = "Auto Reset Mine",
     Description = "When the selected range is complete, use the game's normal mine reset and repeat.",
     Default = false
@@ -2200,6 +2701,47 @@ local AutoResetToggle = Tabs.Automation:AddToggle("AutoResetMine", {
 
 AutoResetToggle:OnChanged(function(value)
     AUTO_RESET_MINE = value == true
+end)
+
+
+SmartResetToggle = Tabs.Automation:AddToggle("SmartReset", {
+    Title = "Smart Reset",
+    Description = "Reset early when known progress is high and ore yield has gone idle.",
+    Default = false
+})
+
+SmartResetToggle:OnChanged(function(value)
+    SMART_RESET = value == true
+end)
+
+SystematicSweepToggle = Tabs.Automation:AddToggle("SystematicSweep", {
+    Title = "Systematic Layer Sweep",
+    Description = "Clear rows in a stable snake-style order instead of jumping randomly.",
+    Default = true
+})
+
+SystematicSweepToggle:OnChanged(function(value)
+    SYSTEMATIC_SWEEP = value == true
+end)
+
+AutoResumeToggle = Tabs.Automation:AddToggle("AutoResume", {
+    Title = "Auto Resume",
+    Description = "Resume after respawn or when the mine folder is recreated.",
+    Default = true
+})
+
+AutoResumeToggle:OnChanged(function(value)
+    AUTO_RESUME = value == true
+end)
+
+SmartRankToggle = Tabs.Automation:AddToggle("SmartRankGrind", {
+    Title = "Smart Rank Grind",
+    Description = "On rank-up, recalculate the automatic depth and continue there.",
+    Default = false
+})
+
+SmartRankToggle:OnChanged(function(value)
+    SMART_RANK_GRIND = value == true
 end)
 
 --------------------------------------------------
@@ -2300,9 +2842,14 @@ ProgressDisplay = Tabs.Stats:AddParagraph({
 
 updateStatsDisplay = function()
     local runtime = Stats.StartTime and (os.clock() - Stats.StartTime) or 0
+    local blocksPerMinute = runtime > 0 and (Stats.BlocksMined / runtime * 60) or 0
+    local oresPerMinute = runtime > 0 and (Stats.OresMined / runtime * 60) or 0
+    local valuePerHour = runtime > 0 and (Stats.EstimatedValue / runtime * 3600) or 0
 
     local text = "Status: " .. tostring(Stats.Status)
         .. "\nRuntime: " .. formatTime(runtime)
+        .. "\nProfile: " .. tostring(FARM_PROFILE)
+        .. "\nAuto Depth: " .. tostring(AUTO_DEPTH_MODE)
         .. "\nPriority: " .. tostring(PRIORITY_MODE)
         .. "\nSweep: " .. tostring(SWEEP_MODE)
         .. "\n\nCurrent Target: " .. tostring(Stats.CurrentTarget or "-")
@@ -2311,8 +2858,12 @@ updateStatsDisplay = function()
         .. "\n\nBlocks Mined: " .. formatNumber(Stats.BlocksMined)
         .. "\nOres Mined: " .. formatNumber(Stats.OresMined)
         .. "\nEstimated Value: " .. formatNumber(Stats.EstimatedValue)
+        .. "\nBlocks/min: " .. string.format("%.1f", blocksPerMinute)
+        .. "\nOres/min: " .. string.format("%.1f", oresPerMinute)
+        .. "\nValue/hour: " .. formatNumber(valuePerHour)
         .. "\nRare Found: " .. tostring(Stats.RareFound)
         .. "\nMine Resets: " .. tostring(Stats.Resets)
+        .. "\nLast Reset: " .. tostring(Stats.LastResetReason or "-")
 
     pcall(function()
         StatsDisplay:SetDesc(text)
@@ -2340,11 +2891,18 @@ updateProgressDisplay = function()
     local knownTotal = mined + remaining
     local percent = knownTotal > 0 and ((mined / knownTotal) * 100) or 100
 
+    local cycleProgress, cycleMined = getCycleProgress()
+    local oreIdle = LastOreMinedAt and (os.clock() - LastOreMinedAt) or 0
+
     local text = "Current Layer: " .. tostring(y)
         .. "\nKnown Mined: " .. tostring(mined)
         .. "\nKnown Remaining: " .. tostring(remaining)
         .. "\nKnown Progress: " .. string.format("%.1f%%", percent)
         .. "\nRange Remaining (known): " .. tostring(rangeRemaining)
+        .. "\n\nCycle Mined: " .. tostring(cycleMined)
+        .. "\nCycle Known Progress: " .. string.format("%.1f%%", cycleProgress * 100)
+        .. "\nOre Idle: " .. string.format("%.1fs", oreIdle)
+        .. "\nSmart Reset: " .. tostring(SMART_RESET and AUTO_RESET_MINE)
         .. "\n\nNote: progress is based on blocks currently revealed by the client."
 
     pcall(function()
@@ -2385,6 +2943,7 @@ AutoMineToggle:OnChanged(function(value)
     if AutoMine then
         resetSessionStats()
         refreshRankDepth()
+        applyAutomaticDepth(false)
         refreshOreDropdownForRange()
         updateRankDisplay()
 
@@ -2394,7 +2953,8 @@ AutoMineToggle:OnChanged(function(value)
             Title = "Auto Mine",
             Content = "Range: " .. tostring(effectiveStart)
                 .. " to " .. tostring(effectiveEnd)
-                .. " | " .. tostring(PRIORITY_MODE),
+                .. " | " .. tostring(PRIORITY_MODE)
+                .. " | " .. tostring(AUTO_DEPTH_MODE),
             Duration = 3
         })
 
@@ -2418,6 +2978,9 @@ pcall(function()
     DataClient:getChangedSignal({"Mining", "Rank"}):Connect(function()
         local oldLimit = RANK_MAX_DEPTH
         refreshRankDepth()
+        if SMART_RANK_GRIND or AUTO_DEPTH_MODE ~= "Manual" then
+            applyAutomaticDepth(true)
+        end
         BlockedTargets = {}
         AlertedRareBlocks = {}
         rebuildWholeIndex()
@@ -2433,6 +2996,31 @@ pcall(function()
         restartActiveMiner()
     end)
 end)
+
+--------------------------------------------------
+-- AUTO RESUME / WATCHDOG
+--------------------------------------------------
+local function scheduleAutoResume(reason)
+    if not AUTO_RESUME or not AutoMine or AutoResumePending or IsResetting then
+        return
+    end
+
+    AutoResumePending = true
+    task.delay(1, function()
+        AutoResumePending = false
+
+        if AUTO_RESUME and AutoMine and not IsResetting then
+            Stats.Status = "Auto resume: " .. tostring(reason or "resume")
+            restartActiveMiner()
+        end
+    end)
+end
+
+LocalPlayer.CharacterAdded:Connect(function()
+    scheduleAutoResume("respawn")
+end)
+
+LastObservedMineFolder = MiningServiceClient.mineFolder
 
 --------------------------------------------------
 -- LIVE STATS / STOP WATCHER
@@ -2451,6 +3039,14 @@ task.spawn(function()
 
         if AutoMine then
             checkStopConditions()
+
+            local currentFolder = MiningServiceClient.mineFolder
+            if currentFolder ~= LastObservedMineFolder then
+                LastObservedMineFolder = currentFolder
+                scheduleAutoResume("mine recreated")
+            end
+        else
+            LastObservedMineFolder = MiningServiceClient.mineFolder
         end
     end
 end)
