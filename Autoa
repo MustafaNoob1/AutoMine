@@ -1,6 +1,6 @@
-warn("[SmartOreMiner] SMART V3 loaded")
+warn("[SmartOreMiner] SMART V4 loaded")
 
--- Smart Ore Miner
+-- Smart Ore Miner V4
 -- Features:
 --  * Rank-aware depth limit
 --  * Start / End depth range
@@ -21,6 +21,10 @@ warn("[SmartOreMiner] SMART V3 loaded")
 --  * Systematic snake-style layer sweep
 --  * Auto resume after respawn / mine recreation
 --  * Farm profiles (Max Money / Rare Hunt / Rank Grind / Full Clear / Low Movement)
+--  * Auto Sell All Ores
+--  * Auto Bucks Upgrade (MiningUpgrades -> Bucks)
+--  * Auto Rank Up
+--  * Smart progression spending priority
 
 --------------------------------------------------
 -- LIBRARIES
@@ -42,7 +46,7 @@ local InterfaceManager = loadstring(game:HttpGet(
 --------------------------------------------------
 local Window = Fluent:CreateWindow({
     Title = "Fluent " .. Fluent.Version,
-    SubTitle = "Smart Ore Miner V3",
+    SubTitle = "Smart Ore Miner V4",
     TabWidth = 160,
     Size = UDim2.fromOffset(650, 590),
     Acrylic = true,
@@ -53,6 +57,7 @@ local Window = Fluent:CreateWindow({
 local Tabs = {
     Main = Window:AddTab({ Title = "Main", Icon = "" }),
     Automation = Window:AddTab({ Title = "Automation", Icon = "bot" }),
+    Progression = Window:AddTab({ Title = "Progression", Icon = "" }),
     Stats = Window:AddTab({ Title = "Stats", Icon = "bar-chart-3" }),
     Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
 }
@@ -73,8 +78,13 @@ local MiningServiceClient = require(
 
 local Info = require(Rs.Packages.Info)
 local MiningInfo = Info.MiningInfo
+local UpgradeInfo = Info.UpgradeInfo
 local BlocksData = require(Rs.Shared.Info.MiningInfo.Blocks)
+local MiningUpgradesData = require(
+    Rs.Shared.Info.UpgradeInfo.UpgradeTypes.MiningUpgrades
+)
 local DataClient = require(Rs.Packages.DataService).client
+local Utils = require(Rs.Packages.Utils)
 local EternityNum = require(Rs.Packages.EternityNum)
 
 --------------------------------------------------
@@ -101,6 +111,23 @@ local AUTO_DEPTH_MODE = "Manual"
 local SMART_RANK_GRIND = false
 local SYSTEMATIC_SWEEP = true
 local AUTO_RESUME = true
+
+-- Economy / progression automation.
+-- These use the same normal client network calls as the game's Sell,
+-- Mining Upgrades and Mining Rank UI.
+local AUTO_SELL_ORES = false
+local AUTO_SELL_INTERVAL = 15
+local AUTO_BUCKS_UPGRADE = false
+local AUTO_RANK_UP = false
+local PROGRESSION_PRIORITY = "Smart"
+local PROGRESSION_TICK_SECONDS = 1
+local PROGRESSION_BUY_DELAY = 0.20
+local PROGRESSION_MAX_UPGRADES_PER_TICK = 3
+
+local ProgressionBusy = false
+local LastAutoSellAt = -math.huge
+local LastProgressionAction = "-"
+local LastProgressionError = "-"
 
 local RARE_ALERT_ENABLED = true
 local RARE_PRIORITY_OVERRIDE = true
@@ -156,7 +183,10 @@ local Stats = {
     CurrentSweepY = nil,
     BestAutoDepth = nil,
     BestAutoDepthScore = 0,
-    LastResetReason = "-"
+    LastResetReason = "-",
+    AutoSells = 0,
+    BucksUpgradesBought = 0,
+    RanksBought = 0
 }
 
 local CycleMinedByDepth = {}
@@ -183,6 +213,12 @@ local SmartResetToggle = nil
 local SystematicSweepToggle = nil
 local AutoResumeToggle = nil
 local SmartRankToggle = nil
+local ProgressionDisplay = nil
+local updateProgressionDisplay = nil
+local AutoSellToggle = nil
+local AutoBucksUpgradeToggle = nil
+local AutoRankToggle = nil
+local ProgressionPriorityDropdown = nil
 
 --------------------------------------------------
 -- HELPERS
@@ -356,6 +392,377 @@ local function refreshRankDepth()
 
     RANK_MAX_DEPTH = safeNumber(info.MaxDepth) or MIN_DEPTH
     return info
+end
+
+--------------------------------------------------
+-- ECONOMY / PROGRESSION HELPERS
+--------------------------------------------------
+local function getGlobalNetworker()
+    local networker = nil
+
+    pcall(function()
+        networker = Utils.networker
+    end)
+
+    return networker
+end
+
+local function invokeGameNetwork(...)
+    local networker = getGlobalNetworker()
+    if not networker then
+        return false, "Utils.networker not ready"
+    end
+
+    local args = {...}
+    local success, result = pcall(function()
+        return networker:InvokeServer(table.unpack(args))
+    end)
+
+    if not success then
+        return false, tostring(result)
+    end
+
+    return true, result
+end
+
+local function getBucksBalance()
+    local success, value = pcall(function()
+        return DataClient:get({"Items", "Bucks"})
+    end)
+
+    if not success then
+        return 0
+    end
+
+    return getComparableValue(value)
+end
+
+local function getBucksUpgradeInfo()
+    local level = 0
+
+    pcall(function()
+        level = math.max(0, math.floor(safeNumber(
+            DataClient:get({"Upgrades", "MiningUpgrades", "Bucks"})
+        ) or 0))
+    end)
+
+    local upgrade = MiningUpgradesData
+        and MiningUpgradesData.upgrades
+        and MiningUpgradesData.upgrades.Bucks
+
+    if not upgrade then
+        return {
+            Level = level,
+            Cap = 0,
+            Cost = nil,
+            Maxed = true
+        }
+    end
+
+    local cap = 15
+    pcall(function()
+        if type(upgrade.cap) == "function" then
+            cap = safeNumber(upgrade:cap(DataClient)) or cap
+        end
+    end)
+
+    cap = math.max(0, math.floor(cap))
+
+    local cost = nil
+    if level < cap
+        and upgrade.cost
+        and type(upgrade.cost.values) == "table" then
+        cost = getComparableValue(upgrade.cost.values[level + 1])
+    end
+
+    return {
+        Level = level,
+        Cap = cap,
+        Cost = cost,
+        Maxed = level >= cap
+    }
+end
+
+local function getNextRankPurchaseInfo()
+    local rankIndex = getCurrentRankIndex()
+    if not rankIndex then
+        return nil
+    end
+
+    local currentRank = nil
+    local nextRank = nil
+
+    pcall(function()
+        currentRank = MiningInfo:getRank(rankIndex)
+        nextRank = MiningInfo:getRank(rankIndex + 1)
+    end)
+
+    if not nextRank then
+        return nil
+    end
+
+    return {
+        CurrentIndex = rankIndex,
+        CurrentName = currentRank and tostring(currentRank.name) or ("Rank " .. tostring(rankIndex)),
+        Name = tostring(nextRank.name or ("Rank " .. tostring(rankIndex + 1))),
+        Cost = getComparableValue(nextRank.cost),
+        UnlocksLayer = currentRank
+            and safeNumber(nextRank.layers)
+            and safeNumber(currentRank.layers)
+            and safeNumber(nextRank.layers) > safeNumber(currentRank.layers)
+            or false
+    }
+end
+
+local function getSellableInventorySummary()
+    local itemCount = 0
+    local estimatedBucks = 0
+    local boost = 1
+
+    pcall(function()
+        boost = getComparableValue(DataClient:get({"Boosts", "Mining_Bucks"}))
+    end)
+
+    if boost <= 0 then
+        boost = 1
+    end
+
+    local allBlocks = nil
+    pcall(function()
+        allBlocks = MiningInfo:getAllBlocks()
+    end)
+
+    if type(allBlocks) ~= "table" then
+        return 0, 0
+    end
+
+    for blockId, blockInfo in pairs(allBlocks) do
+        if blockInfo
+            and blockInfo.item
+            and not blockInfo.hide then
+
+            local locked = false
+            pcall(function()
+                locked = DataClient:get({"Mining", "Ores", blockId, "locked"}) == true
+            end)
+
+            if not locked then
+                local amount = 0
+                pcall(function()
+                    amount = getComparableValue(DataClient:get({"Items", blockInfo.item}))
+                end)
+
+                if amount > 0 then
+                    itemCount = itemCount + amount
+                    estimatedBucks = estimatedBucks
+                        + amount * getComparableValue(blockInfo.value) * boost
+                end
+            end
+        end
+    end
+
+    return itemCount, estimatedBucks
+end
+
+local function sellAllOresNow(ignoreToggle)
+    if not ignoreToggle and not AUTO_SELL_ORES then
+        return false, "Auto Sell disabled"
+    end
+
+    local itemCount = getSellableInventorySummary()
+    if itemCount <= 0 then
+        return false, "No sellable ores"
+    end
+
+    local ok, result = invokeGameNetwork("SellAllOres")
+    if not ok then
+        LastProgressionError = tostring(result)
+        return false, result
+    end
+
+    LastAutoSellAt = os.clock()
+    LastProgressionAction = "Sold all unlocked ores"
+    LastProgressionError = "-"
+    Stats.AutoSells = (Stats.AutoSells or 0) + 1
+    return true, result
+end
+
+local function buyOneBucksUpgrade(ignoreToggle)
+    if not ignoreToggle and not AUTO_BUCKS_UPGRADE then
+        return false, "Auto Bucks Upgrade disabled"
+    end
+
+    local before = getBucksUpgradeInfo()
+    if before.Maxed then
+        return false, "Bucks upgrade maxed"
+    end
+
+    local bucks = getBucksBalance()
+    if not before.Cost or bucks < before.Cost then
+        return false, "Not enough Bucks"
+    end
+
+    local ok, result = invokeGameNetwork("BuyUpgrade", "MiningUpgrades", "Bucks")
+    if not ok then
+        LastProgressionError = tostring(result)
+        return false, result
+    end
+
+    task.wait(PROGRESSION_BUY_DELAY)
+
+    local after = getBucksUpgradeInfo()
+    if after.Level > before.Level then
+        Stats.BucksUpgradesBought = (Stats.BucksUpgradesBought or 0) + (after.Level - before.Level)
+        LastProgressionAction = "Bucks Upgrade " .. tostring(before.Level) .. " -> " .. tostring(after.Level)
+        LastProgressionError = "-"
+        return true, result
+    end
+
+    return false, "Upgrade level did not change"
+end
+
+local function buyNextRankNow(ignoreToggle)
+    if not ignoreToggle and not AUTO_RANK_UP then
+        return false, "Auto Rank disabled"
+    end
+
+    local beforeRank = getCurrentRankIndex()
+    local nextInfo = getNextRankPurchaseInfo()
+
+    if not beforeRank or not nextInfo then
+        return false, "Rank maxed or unavailable"
+    end
+
+    if getBucksBalance() < (nextInfo.Cost or math.huge) then
+        return false, "Not enough Bucks"
+    end
+
+    local ok, result = invokeGameNetwork("BuyNextRank")
+    if not ok then
+        LastProgressionError = tostring(result)
+        return false, result
+    end
+
+    task.wait(PROGRESSION_BUY_DELAY)
+
+    local afterRank = getCurrentRankIndex()
+    if afterRank and afterRank > beforeRank then
+        Stats.RanksBought = (Stats.RanksBought or 0) + (afterRank - beforeRank)
+        LastProgressionAction = "Rank Up: " .. tostring(nextInfo.Name)
+        LastProgressionError = "-"
+        return true, result
+    end
+
+    return false, "Rank did not change"
+end
+
+local function chooseProgressionPurchase()
+    local bucks = getBucksBalance()
+    local upgrade = getBucksUpgradeInfo()
+    local rank = getNextRankPurchaseInfo()
+
+    local canUpgrade = AUTO_BUCKS_UPGRADE
+        and not upgrade.Maxed
+        and upgrade.Cost
+        and bucks >= upgrade.Cost
+
+    local canRank = AUTO_RANK_UP
+        and rank
+        and rank.Cost
+        and bucks >= rank.Cost
+
+    if PROGRESSION_PRIORITY == "Rank First" then
+        if canRank then return "rank" end
+        if canUpgrade then return "upgrade" end
+        return nil
+    end
+
+    if PROGRESSION_PRIORITY == "Bucks Upgrade First" then
+        if canUpgrade then return "upgrade" end
+        if canRank then return "rank" end
+        return nil
+    end
+
+    -- Smart:
+    -- 1) Take an affordable rank immediately when it unlocks a new layer.
+    -- 2) Buy cheap Bucks multiplier upgrades when they cost <= 20% of the next rank.
+    -- 3) Otherwise prefer an affordable rank, then the Bucks upgrade.
+    if canRank and rank.UnlocksLayer then
+        return "rank"
+    end
+
+    if canUpgrade then
+        if not rank or not rank.Cost then
+            return "upgrade"
+        end
+
+        if upgrade.Cost <= rank.Cost * 0.20 then
+            return "upgrade"
+        end
+
+        if bucks >= rank.Cost + upgrade.Cost then
+            return "upgrade"
+        end
+    end
+
+    if canRank then
+        return "rank"
+    end
+
+    if canUpgrade then
+        return "upgrade"
+    end
+
+    return nil
+end
+
+local function runProgressionTick()
+    if ProgressionBusy then
+        return
+    end
+
+    ProgressionBusy = true
+
+    local ok, err = pcall(function()
+        local now = os.clock()
+
+        if AUTO_SELL_ORES
+            and (now - LastAutoSellAt) >= AUTO_SELL_INTERVAL then
+            local sold = sellAllOresNow(false)
+            if sold then
+                task.wait(PROGRESSION_BUY_DELAY)
+            end
+        end
+
+        local action = chooseProgressionPurchase()
+
+        if action == "rank" then
+            buyNextRankNow(false)
+        elseif action == "upgrade" then
+            local bought = 0
+
+            while bought < PROGRESSION_MAX_UPGRADES_PER_TICK do
+                local success = buyOneBucksUpgrade(false)
+                if not success then
+                    break
+                end
+
+                bought = bought + 1
+
+                -- Re-evaluate after each purchase. A rank may now be the smarter spend.
+                if chooseProgressionPurchase() ~= "upgrade" then
+                    break
+                end
+            end
+        end
+    end)
+
+    if not ok then
+        LastProgressionError = tostring(err)
+        warn("SmartOreMiner progression error:", err)
+    end
+
+    ProgressionBusy = false
 end
 
 local function getEffectiveDepthRange()
@@ -852,6 +1259,12 @@ local function resetSessionStats()
     Stats.BestAutoDepth = nil
     Stats.BestAutoDepthScore = 0
     Stats.LastResetReason = "-"
+    Stats.AutoSells = 0
+    Stats.BucksUpgradesBought = 0
+    Stats.RanksBought = 0
+    LastProgressionAction = "-"
+    LastProgressionError = "-"
+    LastAutoSellAt = -math.huge
     CycleMinedByDepth = {}
     AlertedRareBlocks = {}
     CycleStartTime = os.clock()
@@ -2307,6 +2720,10 @@ local function applyFarmProfile(profile)
         AUTO_RESUME = true
         RARE_ALERT_ENABLED = true
         RARE_PRIORITY_OVERRIDE = true
+        AUTO_SELL_ORES = true
+        AUTO_BUCKS_UPGRADE = true
+        AUTO_RANK_UP = true
+        PROGRESSION_PRIORITY = "Smart"
     elseif FARM_PROFILE == "Rare Hunt" then
         PRIORITY_MODE = "Rarest First"
         SWEEP_MODE = "Valuable Ores + Reveal"
@@ -2318,6 +2735,10 @@ local function applyFarmProfile(profile)
         AUTO_RESUME = true
         RARE_ALERT_ENABLED = true
         RARE_PRIORITY_OVERRIDE = true
+        AUTO_SELL_ORES = true
+        AUTO_BUCKS_UPGRADE = true
+        AUTO_RANK_UP = true
+        PROGRESSION_PRIORITY = "Smart"
     elseif FARM_PROFILE == "Rank Grind" then
         PRIORITY_MODE = "Smart"
         SWEEP_MODE = "Full Layer"
@@ -2327,6 +2748,10 @@ local function applyFarmProfile(profile)
         SMART_RANK_GRIND = true
         SYSTEMATIC_SWEEP = true
         AUTO_RESUME = true
+        AUTO_SELL_ORES = true
+        AUTO_BUCKS_UPGRADE = false
+        AUTO_RANK_UP = true
+        PROGRESSION_PRIORITY = "Rank First"
     elseif FARM_PROFILE == "Full Clear" then
         PRIORITY_MODE = "Highest Value"
         SWEEP_MODE = "Full Layer"
@@ -2336,6 +2761,9 @@ local function applyFarmProfile(profile)
         SMART_RANK_GRIND = false
         SYSTEMATIC_SWEEP = true
         AUTO_RESUME = true
+        AUTO_SELL_ORES = false
+        AUTO_BUCKS_UPGRADE = false
+        AUTO_RANK_UP = false
     elseif FARM_PROFILE == "Low Movement" then
         PRIORITY_MODE = "Nearest First"
         SWEEP_MODE = "Valuable Ores + Reveal"
@@ -2345,6 +2773,9 @@ local function applyFarmProfile(profile)
         SMART_RANK_GRIND = false
         SYSTEMATIC_SWEEP = true
         AUTO_RESUME = true
+        AUTO_SELL_ORES = false
+        AUTO_BUCKS_UPGRADE = false
+        AUTO_RANK_UP = false
     end
 
     refreshRankDepth()
@@ -2360,6 +2791,10 @@ local function applyFarmProfile(profile)
         if SystematicSweepToggle then SystematicSweepToggle:SetValue(SYSTEMATIC_SWEEP) end
         if AutoResumeToggle then AutoResumeToggle:SetValue(AUTO_RESUME) end
         if SmartRankToggle then SmartRankToggle:SetValue(SMART_RANK_GRIND) end
+        if AutoSellToggle then AutoSellToggle:SetValue(AUTO_SELL_ORES) end
+        if AutoBucksUpgradeToggle then AutoBucksUpgradeToggle:SetValue(AUTO_BUCKS_UPGRADE) end
+        if AutoRankToggle then AutoRankToggle:SetValue(AUTO_RANK_UP) end
+        if ProgressionPriorityDropdown then ProgressionPriorityDropdown:SetValue(PROGRESSION_PRIORITY) end
     end)
 
     if refreshOreDropdownForRange then
@@ -2828,6 +3263,167 @@ StopRareToggle:OnChanged(function(value)
 end)
 
 --------------------------------------------------
+-- PROGRESSION UI: SELL / BUCKS UPGRADE / RANK
+--------------------------------------------------
+ProgressionDisplay = Tabs.Progression:AddParagraph({
+    Title = "Economy / Progression",
+    Content = "Loading..."
+})
+
+updateProgressionDisplay = function()
+    local bucks = getBucksBalance()
+    local upgrade = getBucksUpgradeInfo()
+    local rank = getNextRankPurchaseInfo()
+    local oreCount, sellValue = getSellableInventorySummary()
+
+    local nextUpgradeText = upgrade.Maxed
+        and "MAXED"
+        or formatNumber(upgrade.Cost or 0)
+
+    local nextRankText = "MAXED"
+    if rank then
+        nextRankText = tostring(rank.Name) .. " | " .. formatNumber(rank.Cost or 0) .. " Bucks"
+    end
+
+    local text = "Bucks: " .. formatNumber(bucks)
+        .. "\nSellable Ore Items: " .. formatNumber(oreCount)
+        .. "\nEstimated Sell: " .. formatNumber(sellValue) .. " Bucks"
+        .. "\n\nBucks Upgrade: " .. tostring(upgrade.Level) .. "/" .. tostring(upgrade.Cap)
+        .. "\nNext Bucks Upgrade: " .. nextUpgradeText
+        .. "\nNext Rank: " .. nextRankText
+        .. "\n\nAuto Sell: " .. tostring(AUTO_SELL_ORES)
+        .. " | every " .. tostring(AUTO_SELL_INTERVAL) .. "s"
+        .. "\nAuto Bucks Upgrade: " .. tostring(AUTO_BUCKS_UPGRADE)
+        .. "\nAuto Rank Up: " .. tostring(AUTO_RANK_UP)
+        .. "\nSpend Priority: " .. tostring(PROGRESSION_PRIORITY)
+        .. "\n\nSession Auto Sells: " .. tostring(Stats.AutoSells or 0)
+        .. "\nBucks Upgrades Bought: " .. tostring(Stats.BucksUpgradesBought or 0)
+        .. "\nRanks Bought: " .. tostring(Stats.RanksBought or 0)
+        .. "\nLast Action: " .. tostring(LastProgressionAction)
+        .. "\nLast Error: " .. tostring(LastProgressionError)
+
+    pcall(function()
+        ProgressionDisplay:SetDesc(text)
+    end)
+end
+
+AutoSellToggle = Tabs.Progression:AddToggle("AutoSellOres", {
+    Title = "Auto Sell All Ores",
+    Description = "Sells all unlocked ore inventory using the game's normal Sell All action.",
+    Default = false
+})
+
+AutoSellToggle:OnChanged(function(value)
+    AUTO_SELL_ORES = value == true
+    if AUTO_SELL_ORES then
+        LastAutoSellAt = -math.huge
+    end
+end)
+
+Tabs.Progression:AddInput("AutoSellInterval", {
+    Title = "Auto Sell Interval (seconds)",
+    Description = "How often Auto Sell checks for sellable ores.",
+    Default = "15",
+    Placeholder = "15",
+    Numeric = false,
+    Finished = true,
+    Callback = function(value)
+        local number = safeNumber(value)
+        if number and number >= 2 then
+            AUTO_SELL_INTERVAL = math.max(2, math.floor(number))
+        end
+    end
+})
+
+AutoBucksUpgradeToggle = Tabs.Progression:AddToggle("AutoBucksUpgrade", {
+    Title = "Auto Bucks Upgrade",
+    Description = "Automatically buys only Mining Upgrades -> Bucks (max level 15).",
+    Default = false
+})
+
+AutoBucksUpgradeToggle:OnChanged(function(value)
+    AUTO_BUCKS_UPGRADE = value == true
+end)
+
+AutoRankToggle = Tabs.Progression:AddToggle("AutoRankUp", {
+    Title = "Auto Rank Up",
+    Description = "Buys the next Mining Rank as soon as the progression logic chooses it.",
+    Default = false
+})
+
+AutoRankToggle:OnChanged(function(value)
+    AUTO_RANK_UP = value == true
+end)
+
+ProgressionPriorityDropdown = Tabs.Progression:AddDropdown("ProgressionPriority", {
+    Title = "Spend Priority",
+    Description = "Smart buys cheap Bucks multipliers but prioritizes ranks that unlock a new layer.",
+    Values = {
+        "Smart",
+        "Rank First",
+        "Bucks Upgrade First"
+    },
+    Multi = false,
+    Default = 1
+})
+
+ProgressionPriorityDropdown:OnChanged(function(value)
+    PROGRESSION_PRIORITY = tostring(value)
+end)
+
+Tabs.Progression:AddButton({
+    Title = "Sell All Now",
+    Description = "Manual test/use of the game's Sell All Ores action.",
+    Callback = function()
+        local ok, reason = sellAllOresNow(true)
+        Fluent:Notify({
+            Title = ok and "Sold Ores" or "Sell",
+            Content = ok and "Sell All request sent." or tostring(reason),
+            Duration = 3
+        })
+        updateProgressionDisplay()
+    end
+})
+
+Tabs.Progression:AddButton({
+    Title = "Buy Bucks Upgrade Now",
+    Description = "Buys one affordable Bucks upgrade only.",
+    Callback = function()
+        if ProgressionBusy then
+            return
+        end
+        ProgressionBusy = true
+        local ok, reason = buyOneBucksUpgrade(true)
+        ProgressionBusy = false
+        Fluent:Notify({
+            Title = ok and "Bucks Upgrade" or "Upgrade",
+            Content = ok and tostring(LastProgressionAction) or tostring(reason),
+            Duration = 3
+        })
+        updateProgressionDisplay()
+    end
+})
+
+Tabs.Progression:AddButton({
+    Title = "Buy Next Rank Now",
+    Description = "Buys the next rank if you can afford it.",
+    Callback = function()
+        if ProgressionBusy then
+            return
+        end
+        ProgressionBusy = true
+        local ok, reason = buyNextRankNow(true)
+        ProgressionBusy = false
+        Fluent:Notify({
+            Title = ok and "Rank Up" or "Rank",
+            Content = ok and tostring(LastProgressionAction) or tostring(reason),
+            Duration = 3
+        })
+        updateProgressionDisplay()
+    end
+})
+
+--------------------------------------------------
 -- STATS UI
 --------------------------------------------------
 StatsDisplay = Tabs.Stats:AddParagraph({
@@ -2863,6 +3459,9 @@ updateStatsDisplay = function()
         .. "\nValue/hour: " .. formatNumber(valuePerHour)
         .. "\nRare Found: " .. tostring(Stats.RareFound)
         .. "\nMine Resets: " .. tostring(Stats.Resets)
+        .. "\nAuto Sells: " .. tostring(Stats.AutoSells or 0)
+        .. "\nBucks Upgrades Bought: " .. tostring(Stats.BucksUpgradesBought or 0)
+        .. "\nRanks Bought: " .. tostring(Stats.RanksBought or 0)
         .. "\nLast Reset: " .. tostring(Stats.LastResetReason or "-")
 
     pcall(function()
@@ -2928,7 +3527,7 @@ Tabs.Stats:AddButton({
 --------------------------------------------------
 AutoMineToggle = Tabs.Main:AddToggle("AutoMine", {
     Title = "Auto Mine",
-    Description = "Rank-aware mining with range sweep, priority, stats and automation.",
+    Description = "Rank-aware mining with sweep, priority, auto sell, upgrades, ranks and stats.",
     Default = false
 })
 
@@ -3037,6 +3636,10 @@ task.spawn(function()
             updateProgressDisplay()
         end
 
+        if updateProgressionDisplay then
+            updateProgressionDisplay()
+        end
+
         if AutoMine then
             checkStopConditions()
 
@@ -3047,6 +3650,22 @@ task.spawn(function()
             end
         else
             LastObservedMineFolder = MiningServiceClient.mineFolder
+        end
+    end
+end)
+
+--------------------------------------------------
+-- AUTO SELL / UPGRADE / RANK WORKER
+--------------------------------------------------
+task.spawn(function()
+    while true do
+        task.wait(PROGRESSION_TICK_SECONDS)
+
+        -- Progression automation is tied to Auto Mine so enabling a spend
+        -- toggle does not silently spend currency while the miner is stopped.
+        if AutoMine
+            and (AUTO_SELL_ORES or AUTO_BUCKS_UPGRADE or AUTO_RANK_UP) then
+            runProgressionTick()
         end
     end
 end)
@@ -3066,4 +3685,5 @@ refreshOreDropdownForRange()
 updateRankDisplay()
 updateStatsDisplay()
 updateProgressDisplay()
+updateProgressionDisplay()
 Window:SelectTab(1)
