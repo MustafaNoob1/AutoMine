@@ -1,4 +1,4 @@
-warn("[SmartOreMiner] SMART V4 FIX6 COMPAT loaded")
+warn("[SmartOreMiner] SMART V4 FIX7 ALL ORES loaded")
 
 -- Smart Ore Miner V4
 -- FIX6 COMPAT: reduces top-level local variables to avoid executor/Luau local-register compile limits.
@@ -47,7 +47,7 @@ local InterfaceManager = loadstring(game:HttpGet(
 --------------------------------------------------
 local Window = Fluent:CreateWindow({
     Title = "Fluent " .. Fluent.Version,
-    SubTitle = "Smart Ore Miner V4 FIX5",
+    SubTitle = "Smart Ore Miner V4 FIX7",
     TabWidth = 160,
     Size = UDim2.fromOffset(650, 590),
     Acrylic = true,
@@ -116,6 +116,7 @@ STALL_LIMIT = 8
 
 PRIORITY_MODE = "Smart"
 SWEEP_MODE = "Full Layer"
+ORE_LIST_MODE = "All Ores"
 
 -- Smart automation. Manual keeps the exact Start / End inputs.
 FARM_PROFILE = "Custom"
@@ -1143,6 +1144,22 @@ warn("[SmartOreMiner] stage 7 OK")
 local function getAvailableOreIdsForRange()
     local result = {}
     local seen = {}
+
+    -- Default mode: show every ore/block option known by BlocksData
+    -- except Stone/Bedrock. Preferences survive mode switches.
+    if ORE_LIST_MODE == "All Ores" then
+        for id in pairs(OreIdToDisplay) do
+            table.insert(result, tostring(id))
+        end
+
+        table.sort(result, function(a, b)
+            return tostring(OreIdToDisplay[a] or a) < tostring(OreIdToDisplay[b] or b)
+        end)
+
+        return result
+    end
+
+    -- Current Depth mode: old depth/rank-aware filter.
     local layers = MiningInfo._layers or {}
     local effectiveStart, effectiveEnd = getEffectiveDepthRange()
 
@@ -2886,6 +2903,25 @@ AutoDepthDropdown:OnChanged(function(value)
 end)
 
 --------------------------------------------------
+-- MAIN UI: ORE LIST MODE
+--------------------------------------------------
+OreListModeDropdown = Tabs.Main:AddDropdown("OreListMode", {
+    Title = "Ore List Mode",
+    Description = "All Ores shows everything. Current Depth only shows ores/blocks that can spawn in the effective farm range.",
+    Values = {
+        "All Ores",
+        "Current Depth"
+    },
+    Multi = false,
+    Default = 1
+})
+
+OreListModeDropdown:OnChanged(function(value)
+    ORE_LIST_MODE = tostring(value or "All Ores")
+    refreshOreDropdownForRange()
+end)
+
+--------------------------------------------------
 -- MAIN UI: ORES
 --------------------------------------------------
 -- IMPORTANT FLUENT FIX:
@@ -2901,7 +2937,7 @@ end
 warn("[SmartOreMiner] stage 11: OreSelection dropdown")
 OreDropdown = Tabs.Main:AddDropdown("OreSelection", {
     Title = "Select Ores",
-    Description = "Only ores/blocks that can spawn in the selected depth range are shown.",
+    Description = "Choose ores/blocks to prioritize. All Ores is shown by default.",
     Values = initialOreDropdownValues,
     Multi = true,
     Default = {}
@@ -3719,4 +3755,4 @@ updateStatsDisplay()
 updateProgressDisplay()
 updateProgressionDisplay()
 Window:SelectTab(1)
-warn("[SmartOreMiner] SMART V4 FIX6 COMPAT ready")
+warn("[SmartOreMiner] SMART V4 FIX7 ALL ORES ready")
