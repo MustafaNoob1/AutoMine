@@ -1,3 +1,7 @@
+--------------------------------------------------
+-- LIBRARIES
+--------------------------------------------------
+
 local Fluent = loadstring(game:HttpGet(
     "https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"
 ))()
@@ -17,7 +21,7 @@ local InterfaceManager = loadstring(game:HttpGet(
 
 local Window = Fluent:CreateWindow({
     Title = "Fluent " .. Fluent.Version,
-    SubTitle = "Dynamic Ore Miner",
+    SubTitle = "Adaptive Ore Miner",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = true,
@@ -50,32 +54,32 @@ local Players =
         game:GetService("Players")
     )
 
-
-local Rs =
+local ReplicatedStorage =
     cloneref(
         game:GetService("ReplicatedStorage")
     )
-
 
 local LocalPlayer =
     Players.LocalPlayer
 
 
+--------------------------------------------------
+-- GAME MODULES
+--------------------------------------------------
+
 local MiningServiceClient =
     require(
-        Rs.Shared.Services.MiningService.MiningServiceClient
+        ReplicatedStorage.Shared.Services.MiningService.MiningServiceClient
     )
-
 
 local MiningInfo =
     require(
-        Rs.Packages.Info
+        ReplicatedStorage.Packages.Info
     ).MiningInfo
-
 
 local BlocksData =
     require(
-        Rs.Shared.Info.MiningInfo.Blocks
+        ReplicatedStorage.Shared.Info.MiningInfo.Blocks
     )
 
 
@@ -85,104 +89,59 @@ local BlocksData =
 
 local AutoMine = false
 
-
--- Tiefstes erlaubtes Mining-Level.
 local MIN_DEPTH = -4999
 
-
--- Gewünschter Startpunkt für Full Mining.
---
--- Beispiel:
---
--- -3000
---
--- Loader geht zuerst nach unten.
--- Ab ungefähr -3000 werden komplette Ebenen bearbeitet.
+-- Ab dieser Tiefe werden Stone +
+-- ausgewählte Erze normal verarbeitet.
 local START_DEPTH = 0
 
+-- Damage-Aufrufe vor einem Yield.
+local DAMAGE_BURST = 10
 
---------------------------------------------------
--- LOADER POSITION
---------------------------------------------------
-
--- Bevorzugte X/Z Position.
---
--- Falls dort kein Block existiert,
--- wird automatisch ein anderer Block auf
--- derselben Ebene gesucht.
-
+-- bevorzugte Tunnelposition
 local LOADER_X = 9
 local LOADER_Z = 9
 
+-- Streaming
+local STREAM_WAIT = 0.04
+local STREAM_CHECKS = 40
 
---------------------------------------------------
--- SPEED
---------------------------------------------------
-
--- Anzahl Damage-Aufrufe pro Yield.
---
--- Falls Probleme:
---
--- 5 -> 3 -> 2 -> 1
-
-local DAMAGE_BURST = 5
-
-
---------------------------------------------------
--- LOADING
---------------------------------------------------
-
--- 300 * 0.05 = viele kurze Versuche,
--- damit neue Mine-Blöcke erscheinen können.
-
-local LOAD_RETRIES = 300
-
-local LOAD_WAIT = 0.05
-
-
---------------------------------------------------
--- PLAYER MOVE
---------------------------------------------------
-
--- Position etwas oberhalb des gerade
--- zerstörten Blocks.
-
-local PLAYER_OFFSET_Y = 2
+-- Wie weit der Charakter beim Streaming
+-- maximal nach unten getestet wird.
+local MAX_STREAM_DROP = 48
 
 
 --------------------------------------------------
 -- RUN CONTROL
 --------------------------------------------------
 
-local MiningRunId = 0
+local RunId = 0
 
 
-local function isCurrentRun(runId)
+local function isRunning(id)
 
     return
         AutoMine
-        and MiningRunId == runId
+        and id == RunId
 
 end
 
 
 --------------------------------------------------
--- GET BLOCK COORDINATES
+-- BLOCK COORDINATES
 --------------------------------------------------
 
-local function getBlockCoordinates(block)
+local function getCoordinates(block)
 
     if not block then
         return nil, nil, nil
     end
-
 
     local x, y, z =
         string.match(
             block.Name,
             "^(-?%d+)_(-?%d+)_(-?%d+)$"
         )
-
 
     return
         tonumber(x),
@@ -193,7 +152,7 @@ end
 
 
 --------------------------------------------------
--- GET Y
+-- BLOCK Y
 --------------------------------------------------
 
 local function getBlockY(block)
@@ -202,126 +161,103 @@ local function getBlockY(block)
         return nil
     end
 
-
     local _, y, _ =
-        getBlockCoordinates(block)
-
+        getCoordinates(block)
 
     if y ~= nil then
         return y
     end
 
-
-    --------------------------------------------------
-    -- FALLBACK TO ORIGINAL PATTERN
-    --------------------------------------------------
-
-    local fallbackY =
+    -- Fallback zur ursprünglichen Namenslogik
+    local value =
         string.match(
             block.Name,
             "^[^_]+_(-?%d+)_"
         )
 
-
-    return tonumber(
-        fallbackY
-    )
+    return tonumber(value)
 
 end
 
 
 --------------------------------------------------
--- WORLD DEPTH CHECK
+-- VALID DEPTH
 --------------------------------------------------
 
-local function isValidWorldDepth(y)
-
-    if y == nil then
-        return false
-    end
-
+local function validDepth(y)
 
     return
-        y <= 0
+        y ~= nil
+        and y <= 0
         and y >= MIN_DEPTH
 
 end
 
 
 --------------------------------------------------
--- FULL MINING DEPTH CHECK
+-- FULL MINING RANGE
 --------------------------------------------------
 
-local function isMiningDepth(y)
-
-    if y == nil then
-        return false
-    end
-
+local function inMiningRange(y)
 
     return
-        y <= START_DEPTH
+        y ~= nil
+        and y <= START_DEPTH
         and y >= MIN_DEPTH
 
 end
 
 
 --------------------------------------------------
--- GET BLOCK INFO
+-- BLOCK INFO
 --------------------------------------------------
 
-local function getBlockInfo(block)
+local function loadBlockInfo(block)
 
     if not block then
         return nil
     end
 
-
-    local blockData =
+    local data =
         MiningServiceClient.blocks[
             block.Name
         ]
 
-
-    if not blockData then
+    if not data then
         return nil
     end
 
+    local id =
+        data[1]
 
-    local blockId =
-        blockData[1]
-
-
-    if not blockId
-        or blockId == "None" then
+    if not id
+        or id == "None" then
 
         return nil
-
     end
-
 
     local info =
-        MiningInfo:getBlock(
-            blockId
-        )
-
+        MiningInfo:getBlock(id)
 
     if not info then
         return nil
     end
 
-
     return {
 
-        Id = blockId,
+        Id = id,
 
-        Name = info.name,
+        Name =
+            info.name,
 
-        HP = info.hp,
+        HP =
+            info.hp,
 
-        Value = info.value,
+        Value =
+            info.value,
 
-        Model = info.model
+        Model =
+            info.model
 
     }
 
@@ -329,18 +265,14 @@ end
 
 
 --------------------------------------------------
--- STONE CHECK
+-- BLOCK TYPES
 --------------------------------------------------
 
 local function isStone(info)
 
-    if not info then
-        return false
-    end
-
-
     return
-        string.match(
+        info ~= nil
+        and string.match(
             info.Id,
             "^StoneOre%d*$"
         ) ~= nil
@@ -348,19 +280,11 @@ local function isStone(info)
 end
 
 
---------------------------------------------------
--- BEDROCK CHECK
---------------------------------------------------
-
 local function isBedrock(info)
 
-    if not info then
-        return false
-    end
-
-
     return
-        info.Id == "Bedrock"
+        info ~= nil
+        and info.Id == "Bedrock"
 
 end
 
@@ -378,16 +302,11 @@ local function isSelectedOre(info)
         return false
     end
 
+    if isStone(info)
+        or isBedrock(info) then
 
-    if isStone(info) then
         return false
     end
-
-
-    if isBedrock(info) then
-        return false
-    end
-
 
     return
         SelectedOres[
@@ -398,243 +317,69 @@ end
 
 
 --------------------------------------------------
--- BLOCK POSITION
---------------------------------------------------
-
-local function getBlockCFrame(block)
-
-    if not block then
-        return nil
-    end
-
-
-    --------------------------------------------------
-    -- BASEPART
-    --------------------------------------------------
-
-    if block:IsA("BasePart") then
-
-        return block.CFrame
-
-    end
-
-
-    --------------------------------------------------
-    -- MODEL / OTHER PVINSTANCE
-    --------------------------------------------------
-
-    local success, result =
-        pcall(function()
-
-            return block:GetPivot()
-
-        end)
-
-
-    if success then
-        return result
-    end
-
-
-    return nil
-
-end
-
-
---------------------------------------------------
--- MOVE PLAYER
---------------------------------------------------
-
-local function movePlayerToBlockPosition(
-    targetCFrame
-)
-
-    if not targetCFrame then
-        return false
-    end
-
-
-    local character =
-        LocalPlayer.Character
-
-
-    if not character then
-        return false
-    end
-
-
-    local root =
-        character:FindFirstChild(
-            "HumanoidRootPart"
-        )
-
-
-    if not root then
-        return false
-    end
-
-
-    local targetPosition =
-        targetCFrame.Position
-        + Vector3.new(
-            0,
-            PLAYER_OFFSET_Y,
-            0
-        )
-
-
-    local lookVector =
-        root.CFrame.LookVector
-
-
-    local target =
-        CFrame.new(
-            targetPosition,
-            targetPosition + lookVector
-        )
-
-
-    local success =
-        pcall(function()
-
-            character:PivotTo(
-                target
-            )
-
-        end)
-
-
-    task.wait(0.15)
-
-
-    return success
-
-end
-
-
---------------------------------------------------
--- MOVE PLAYER SLIGHTLY DOWN
---------------------------------------------------
-
-local function nudgePlayerDown(
-    baseCFrame,
-    amount
-)
-
-    if not baseCFrame then
-        return
-    end
-
-
-    local target =
-        CFrame.new(
-            baseCFrame.Position
-            + Vector3.new(
-                0,
-                -amount,
-                0
-            )
-        )
-
-
-    movePlayerToBlockPosition(
-        target
-    )
-
-end
-
-
---------------------------------------------------
--- GET EXACT BLOCK
---------------------------------------------------
-
-local function getBlockAt(
-    x,
-    y,
-    z
-)
-
-    local folder =
-        MiningServiceClient.mineFolder
-
-
-    if not folder then
-        return nil
-    end
-
-
-    local blockName =
-        tostring(x)
-        .. "_"
-        .. tostring(y)
-        .. "_"
-        .. tostring(z)
-
-
-    return
-        folder:FindFirstChild(
-            blockName
-        )
-
-end
-
-
---------------------------------------------------
 -- INDEX
 --------------------------------------------------
 
-local BlocksByY = {}
-
 local AllBlocks = {}
+
+local BlockInfoCache = {}
 
 local BlockYCache = {}
 
-local SelectedOreBlocks = {}
+local BlocksByY = {}
 
+local NonBedrockByY = {}
+
+local StoneByY = {}
+
+local SelectedByY = {}
 
 local IndexedFolder = nil
 
-local FolderConnections = {}
+local Connections = {}
 
 
 --------------------------------------------------
--- CLEAR CONNECTIONS
+-- MAP HELPERS
 --------------------------------------------------
 
-local function clearConnections()
+local function addToMap(
+    map,
+    y,
+    block
+)
 
-    for _, connection in ipairs(
-        FolderConnections
-    ) do
-
-
-        pcall(function()
-
-            connection:Disconnect()
-
-        end)
-
+    if not map[y] then
+        map[y] = {}
     end
 
-
-    FolderConnections = {}
+    map[y][block] =
+        true
 
 end
 
 
---------------------------------------------------
--- CLEAR INDEX
---------------------------------------------------
+local function removeFromMap(
+    map,
+    y,
+    block
+)
 
-local function clearIndex()
+    if not y
+        or not map[y] then
 
-    BlocksByY = {}
+        return
+    end
 
-    AllBlocks = {}
+    map[y][block] =
+        nil
 
-    BlockYCache = {}
+    if next(map[y]) == nil then
 
-    SelectedOreBlocks = {}
+        map[y] =
+            nil
+
+    end
 
 end
 
@@ -649,67 +394,71 @@ local function registerBlock(block)
         return
     end
 
-
     if AllBlocks[block] then
         return
     end
 
-
     local y =
         getBlockY(block)
 
+    if not validDepth(y) then
+        return
+    end
 
-    if not isValidWorldDepth(y) then
+    local info =
+        loadBlockInfo(block)
+
+    if not info then
         return
     end
 
 
-    --------------------------------------------------
-    -- ALL BLOCKS
-    --------------------------------------------------
-
     AllBlocks[block] =
         true
 
+    BlockInfoCache[block] =
+        info
 
     BlockYCache[block] =
         y
 
 
-    --------------------------------------------------
-    -- Y INDEX
-    --------------------------------------------------
+    addToMap(
+        BlocksByY,
+        y,
+        block
+    )
 
-    if not BlocksByY[y] then
 
-        BlocksByY[y] = {}
+    if not isBedrock(info) then
+
+        addToMap(
+            NonBedrockByY,
+            y,
+            block
+        )
 
     end
 
 
-    BlocksByY[y][block] =
-        true
+    if isStone(info) then
+
+        addToMap(
+            StoneByY,
+            y,
+            block
+        )
+
+    end
 
 
-    --------------------------------------------------
-    -- ORE CACHE
-    --------------------------------------------------
+    if isSelectedOre(info) then
 
-    if isMiningDepth(y) then
-
-
-        local info =
-            getBlockInfo(block)
-
-
-        if info
-            and isSelectedOre(info) then
-
-
-            SelectedOreBlocks[block] =
-                true
-
-        end
+        addToMap(
+            SelectedByY,
+            y,
+            block
+        )
 
     end
 
@@ -726,149 +475,132 @@ local function unregisterBlock(block)
         return
     end
 
-
     local y =
         BlockYCache[block]
 
 
-    --------------------------------------------------
-    -- REMOVE FROM Y
-    --------------------------------------------------
+    removeFromMap(
+        BlocksByY,
+        y,
+        block
+    )
 
-    if y
-        and BlocksByY[y] then
+    removeFromMap(
+        NonBedrockByY,
+        y,
+        block
+    )
 
+    removeFromMap(
+        StoneByY,
+        y,
+        block
+    )
 
-        BlocksByY[y][block] =
-            nil
+    removeFromMap(
+        SelectedByY,
+        y,
+        block
+    )
 
-
-        if next(
-            BlocksByY[y]
-        ) == nil then
-
-
-            BlocksByY[y] =
-                nil
-
-        end
-
-    end
-
-
-    --------------------------------------------------
-    -- REMOVE FROM CACHES
-    --------------------------------------------------
 
     AllBlocks[block] =
         nil
 
+    BlockInfoCache[block] =
+        nil
 
     BlockYCache[block] =
         nil
 
+end
 
-    SelectedOreBlocks[block] =
-        nil
+
+--------------------------------------------------
+-- CLEAR INDEX
+--------------------------------------------------
+
+local function clearIndex()
+
+    AllBlocks = {}
+
+    BlockInfoCache = {}
+
+    BlockYCache = {}
+
+    BlocksByY = {}
+
+    NonBedrockByY = {}
+
+    StoneByY = {}
+
+    SelectedByY = {}
 
 end
 
 
 --------------------------------------------------
--- REFRESH INDEX
+-- DISCONNECT OLD FOLDER
 --------------------------------------------------
 
-local function refreshIndex()
+local function disconnectFolder()
+
+    for _, connection in ipairs(
+        Connections
+    ) do
+
+        pcall(function()
+
+            connection:Disconnect()
+
+        end)
+
+    end
+
+    Connections = {}
+
+end
+
+
+--------------------------------------------------
+-- RESCAN FOLDER
+--------------------------------------------------
+
+local function rescanFolder()
 
     local folder =
         MiningServiceClient.mineFolder
-
-
-    if not folder then
-        return
-    end
-
-
-    for _, block in ipairs(
-        folder:GetChildren()
-    ) do
-
-
-        registerBlock(
-            block
-        )
-
-    end
-
-end
-
-
---------------------------------------------------
--- REBUILD SELECTED ORE CACHE
---------------------------------------------------
-
-local function rebuildSelectedOreCache()
-
-    SelectedOreBlocks = {}
-
-
-    for block in pairs(
-        AllBlocks
-    ) do
-
-
-        if block
-            and block.Parent then
-
-
-            local y =
-                BlockYCache[block]
-                or getBlockY(block)
-
-
-            if isMiningDepth(y) then
-
-
-                local info =
-                    getBlockInfo(block)
-
-
-                if info
-                    and isSelectedOre(info) then
-
-
-                    SelectedOreBlocks[block] =
-                        true
-
-                end
-
-            end
-
-        end
-
-    end
-
-end
-
-
---------------------------------------------------
--- SETUP INDEX
---------------------------------------------------
-
-local function setupMineIndex()
-
-    local folder =
-        MiningServiceClient.mineFolder
-
 
     if not folder then
         return false
     end
 
+    for _, block in ipairs(
+        folder:GetChildren()
+    ) do
 
-    --------------------------------------------------
-    -- SAME FOLDER
-    --------------------------------------------------
+        registerBlock(block)
+
+    end
+
+    return true
+
+end
+
+
+--------------------------------------------------
+-- SETUP FOLDER
+--------------------------------------------------
+
+local function setupFolder()
+
+    local folder =
+        MiningServiceClient.mineFolder
+
+    if not folder then
+        return false
+    end
+
 
     if IndexedFolder == folder then
 
@@ -877,11 +609,7 @@ local function setupMineIndex()
     end
 
 
-    --------------------------------------------------
-    -- RESET
-    --------------------------------------------------
-
-    clearConnections()
+    disconnectFolder()
 
     clearIndex()
 
@@ -890,28 +618,17 @@ local function setupMineIndex()
         folder
 
 
-    --------------------------------------------------
-    -- INITIAL BLOCKS
-    --------------------------------------------------
+    rescanFolder()
 
-    refreshIndex()
-
-
-    --------------------------------------------------
-    -- CHILD ADDED
-    --------------------------------------------------
 
     table.insert(
 
-        FolderConnections,
+        Connections,
 
         folder.ChildAdded:Connect(
             function(block)
 
-
-                registerBlock(
-                    block
-                )
+                registerBlock(block)
 
             end
         )
@@ -919,21 +636,14 @@ local function setupMineIndex()
     )
 
 
-    --------------------------------------------------
-    -- CHILD REMOVED
-    --------------------------------------------------
-
     table.insert(
 
-        FolderConnections,
+        Connections,
 
         folder.ChildRemoved:Connect(
             function(block)
 
-
-                unregisterBlock(
-                    block
-                )
+                unregisterBlock(block)
 
             end
         )
@@ -947,68 +657,111 @@ end
 
 
 --------------------------------------------------
--- CHECK LEVEL
+-- REBUILD SELECTED ORES
 --------------------------------------------------
 
-local function levelExists(y)
+local function rebuildSelectedIndex()
 
-    local level =
-        BlocksByY[y]
-
-
-    if not level then
-        return false
-    end
+    SelectedByY = {}
 
 
-    for block in pairs(level) do
-
+    for block in pairs(
+        AllBlocks
+    ) do
 
         if block
             and block.Parent then
 
+            local info =
+                BlockInfoCache[block]
 
-            return true
+            local y =
+                BlockYCache[block]
+
+
+            if info
+                and y
+                and isSelectedOre(info) then
+
+                addToMap(
+                    SelectedByY,
+                    y,
+                    block
+                )
+
+            end
 
         end
 
     end
 
+end
 
-    return false
+
+--------------------------------------------------
+-- CLEAN BUCKET
+--------------------------------------------------
+
+local function cleanBucket(bucket)
+
+    if not bucket then
+        return false
+    end
+
+    for block in pairs(
+        bucket
+    ) do
+
+        if not block
+            or not block.Parent then
+
+            bucket[block] =
+                nil
+
+        end
+
+    end
+
+    return
+        next(bucket) ~= nil
 
 end
 
 
 --------------------------------------------------
--- FIND HIGHEST LOADED LEVEL <= VALUE
+-- DEEPEST Y IN MAP
 --------------------------------------------------
 
-local function getHighestLoadedYAtOrBelow(
+local function deepestY(
+    map,
     maximumY
 )
 
-    local bestY =
+    local best =
         nil
 
 
-    for y, level in pairs(
-        BlocksByY
+    for y, bucket in pairs(
+        map
     ) do
 
-
-        if y <= maximumY
-            and y >= MIN_DEPTH
-            and level
-            and next(level) ~= nil then
-
-
-            if bestY == nil
-                or y > bestY then
+        if y >= MIN_DEPTH
+            and (
+                maximumY == nil
+                or y <= maximumY
+            ) then
 
 
-                bestY =
-                    y
+            if cleanBucket(bucket) then
+
+
+                if best == nil
+                    or y < best then
+
+                    best =
+                        y
+
+                end
 
             end
 
@@ -1017,107 +770,55 @@ local function getHighestLoadedYAtOrBelow(
     end
 
 
-    return bestY
+    return best
 
 end
 
 
 --------------------------------------------------
--- FIND NEXT REAL Y BELOW CURRENT
+-- GET ANY LIVE BLOCK
 --------------------------------------------------
 
-local function getNextLoadedYBelow(
-    currentY
-)
+local function getAnyBlock(bucket)
 
-    local bestY =
-        nil
+    if not bucket then
+        return nil
+    end
 
-
-    for y, level in pairs(
-        BlocksByY
+    for block in pairs(
+        bucket
     ) do
 
+        if block
+            and block.Parent then
 
-        if y < currentY
-            and y >= MIN_DEPTH
-            and level
-            and next(level) ~= nil then
+            return block
 
+        else
 
-            --------------------------------------------------
-            -- CLOSEST Y BELOW CURRENT
-            --------------------------------------------------
-
-            if bestY == nil
-                or y > bestY then
-
-
-                bestY =
-                    y
-
-            end
+            bucket[block] =
+                nil
 
         end
 
     end
 
-
-    return bestY
+    return nil
 
 end
 
 
 --------------------------------------------------
--- GET CLOSEST BLOCK ON LEVEL
+-- NEAREST BLOCK BY X/Z
 --------------------------------------------------
 
-local function getClosestBlockOnLevel(
-    y,
-    preferredX,
-    preferredZ
+local function getNearestBlock(
+    bucket,
+    targetX,
+    targetZ
 )
 
-    --------------------------------------------------
-    -- EXACT BLOCK FIRST
-    --------------------------------------------------
-
-    local exact =
-        getBlockAt(
-            preferredX,
-            y,
-            preferredZ
-        )
-
-
-    if exact
-        and exact.Parent then
-
-
-        local info =
-            getBlockInfo(exact)
-
-
-        if info
-            and not isBedrock(info) then
-
-
-            return exact
-
-        end
-
-    end
-
-
-    --------------------------------------------------
-    -- SEARCH LEVEL
-    --------------------------------------------------
-
-    local level =
-        BlocksByY[y]
-
-
-    if not level then
+    if not bucket then
         return nil
     end
 
@@ -1125,77 +826,63 @@ local function getClosestBlockOnLevel(
     local bestBlock =
         nil
 
-
     local bestDistance =
         math.huge
-
 
     local fallback =
         nil
 
 
-    for block in pairs(level) do
+    for block in pairs(
+        bucket
+    ) do
 
 
-        if block
-            and block.Parent then
+        if not block
+            or not block.Parent then
+
+            bucket[block] =
+                nil
 
 
-            local info =
-                getBlockInfo(block)
+        else
+
+            if not fallback then
+
+                fallback =
+                    block
+
+            end
 
 
-            --------------------------------------------------
-            -- SKIP BEDROCK
-            --------------------------------------------------
-
-            if info
-                and not isBedrock(info) then
+            local x, _, z =
+                getCoordinates(block)
 
 
-                if not fallback then
+            if x ~= nil
+                and z ~= nil then
 
-                    fallback =
+
+                local dx =
+                    x - targetX
+
+                local dz =
+                    z - targetZ
+
+
+                local distance =
+                    dx * dx
+                    + dz * dz
+
+
+                if distance
+                    < bestDistance then
+
+                    bestDistance =
+                        distance
+
+                    bestBlock =
                         block
-
-                end
-
-
-                local x, _, z =
-                    getBlockCoordinates(
-                        block
-                    )
-
-
-                if x ~= nil
-                    and z ~= nil then
-
-
-                    local dx =
-                        x - preferredX
-
-
-                    local dz =
-                        z - preferredZ
-
-
-                    local distance =
-                        dx * dx
-                        + dz * dz
-
-
-                    if distance
-                        < bestDistance then
-
-
-                        bestDistance =
-                            distance
-
-
-                        bestBlock =
-                            block
-
-                    end
 
                 end
 
@@ -1214,17 +901,132 @@ end
 
 
 --------------------------------------------------
--- RAW DAMAGE
+-- BLOCK CFRAME
 --------------------------------------------------
 
-local function damageBlockRaw(block)
+local function getBlockTransform(block)
 
     if not block then
+        return nil, 6
+    end
+
+
+    if block:IsA(
+        "BasePart"
+    ) then
+
+        return
+            block.CFrame,
+            math.max(
+                block.Size.Y,
+                1
+            )
+
+    end
+
+
+    local success, pivot =
+        pcall(function()
+
+            return block:GetPivot()
+
+        end)
+
+
+    if success then
+
+        return pivot, 6
+
+    end
+
+
+    return nil, 6
+
+end
+
+
+--------------------------------------------------
+-- MOVE CHARACTER
+--------------------------------------------------
+
+local function moveCharacter(
+    cframe,
+    downAmount
+)
+
+    if not cframe then
         return false
     end
 
 
-    if not block.Parent then
+    local character =
+        LocalPlayer.Character
+
+    if not character then
+        return false
+    end
+
+
+    local root =
+        character:FindFirstChild(
+            "HumanoidRootPart"
+        )
+
+    if not root then
+        return false
+    end
+
+
+    downAmount =
+        downAmount
+        or 0
+
+
+    local position =
+        cframe.Position
+        + Vector3.new(
+            0,
+            2 - downAmount,
+            0
+        )
+
+
+    local look =
+        root.CFrame.LookVector
+
+
+    pcall(function()
+
+        character:PivotTo(
+            CFrame.new(
+                position,
+                position + look
+            )
+        )
+
+        root.AssemblyLinearVelocity =
+            Vector3.zero
+
+        root.AssemblyAngularVelocity =
+            Vector3.zero
+
+    end)
+
+
+    return true
+
+end
+
+
+--------------------------------------------------
+-- RAW DAMAGE
+--------------------------------------------------
+
+local function damage(block)
+
+    if not block
+        or not block.Parent then
+
         return false
     end
 
@@ -1233,46 +1035,12 @@ local function damageBlockRaw(block)
         "isBlock"
     ) then
 
-
-        return false
-
-    end
-
-
-    local y =
-        getBlockY(block)
-
-
-    if not isValidWorldDepth(y) then
         return false
     end
 
-
-    local info =
-        getBlockInfo(block)
-
-
-    if not info then
-        return false
-    end
-
-
-    --------------------------------------------------
-    -- BEDROCK
-    --------------------------------------------------
-
-    if isBedrock(info) then
-        return false
-    end
-
-
-    --------------------------------------------------
-    -- DAMAGE
-    --------------------------------------------------
 
     MiningServiceClient.currentBlock =
         block
-
 
     MiningServiceClient:damageBlock()
 
@@ -1283,64 +1051,85 @@ end
 
 
 --------------------------------------------------
--- MINE ANY BLOCK
+-- FAST MINE
 --------------------------------------------------
 
--- Wird ausschließlich für den Loader benutzt.
---
--- Damit kann auch ein nicht ausgewähltes Erz
--- im Weg abgebaut werden.
-
-local function mineAnyBlock(
+local function mineFast(
     block,
-    runId
+    mode,
+    run
 )
 
-    if not block then
+    if not block
+        or not block.Parent then
+
         return false
     end
 
 
-    while
-        block.Parent
-        and isCurrentRun(runId)
-    do
+    local info =
+        BlockInfoCache[block]
+        or loadBlockInfo(block)
 
 
-        local info =
-            getBlockInfo(block)
+    if not info then
+        return false
+    end
 
 
-        if not info then
-            return false
-        end
+    if isBedrock(info) then
+        return false
+    end
 
 
-        if isBedrock(info) then
-            return false
-        end
+    --------------------------------------------------
+    -- TYPE CHECK
+    --------------------------------------------------
+
+    if mode == "stone"
+        and not isStone(info) then
+
+        return false
+
+    end
 
 
-        --------------------------------------------------
-        -- DAMAGE BURST
-        --------------------------------------------------
+    if mode == "selected"
+        and not isSelectedOre(info) then
+
+        return false
+
+    end
+
+
+    --------------------------------------------------
+    -- SET TARGET ONCE
+    --------------------------------------------------
+
+    MiningServiceClient.currentBlock =
+        block
+
+
+    --------------------------------------------------
+    -- MINE UNTIL DESTROYED
+    --------------------------------------------------
+
+    while block.Parent
+        and isRunning(run) do
+
 
         for i = 1, DAMAGE_BURST do
 
 
-            if not isCurrentRun(runId) then
-                return false
-            end
+            if not block.Parent
+                or not isRunning(run) then
 
-
-            if not block.Parent then
-                return true
-            end
-
-
-            if not damageBlockRaw(block) then
                 break
+
             end
+
+
+            MiningServiceClient:damageBlock()
 
         end
 
@@ -1350,227 +1139,98 @@ local function mineAnyBlock(
     end
 
 
-    --------------------------------------------------
-    -- BLOCK DESTROYED
-    --------------------------------------------------
-
-    if not block.Parent then
-        return true
-    end
-
-
-    return false
+    return
+        not block.Parent
 
 end
 
 
 --------------------------------------------------
--- MINE BLOCK FAST
+-- STREAM FOR DEEPER BLOCKS
 --------------------------------------------------
 
-local function mineBlockFast(
-    block,
-    checkFunction,
-    runId
+local function tryLoadDeeper(
+    previousY,
+    blockCFrame,
+    blockHeight,
+    run
 )
 
-    if not block then
-        return
-    end
+    local oldDeepest =
+        previousY
 
 
-    while
-        block.Parent
-        and isCurrentRun(runId)
-    do
+    for attempt = 1, STREAM_CHECKS do
 
 
-        local y =
-            getBlockY(block)
-
-
-        if not isMiningDepth(y) then
-            return
-        end
-
-
-        local info =
-            getBlockInfo(block)
-
-
-        if not info then
-            return
-        end
-
-
-        if isBedrock(info) then
-            return
-        end
-
-
-        if not checkFunction(info) then
-            return
-        end
-
-
-        --------------------------------------------------
-        -- DAMAGE BURST
-        --------------------------------------------------
-
-        for i = 1, DAMAGE_BURST do
-
-
-            if not block.Parent then
-                return
-            end
-
-
-            if not isCurrentRun(runId) then
-                return
-            end
-
-
-            if not damageBlockRaw(block) then
-                return
-            end
-
-        end
-
-
-        task.wait()
-
-    end
-
-end
-
-
---------------------------------------------------
--- MINE SELECTED ORE
---------------------------------------------------
-
-local function mineSelectedOre(
-    block,
-    runId
-)
-
-    mineBlockFast(
-        block,
-        isSelectedOre,
-        runId
-    )
-
-end
-
-
---------------------------------------------------
--- MINE STONE
---------------------------------------------------
-
-local function mineStone(
-    block,
-    runId
-)
-
-    mineBlockFast(
-        block,
-        isStone,
-        runId
-    )
-
-end
-
-
---------------------------------------------------
--- WAIT FOR NEXT LOADED LEVEL
---------------------------------------------------
-
-local function waitForNextLoadedY(
-    currentY,
-    runId,
-    loaderCFrame
-)
-
-    for attempt = 1, LOAD_RETRIES do
-
-
-        if not isCurrentRun(runId) then
+        if not isRunning(run) then
             return nil
         end
 
 
         --------------------------------------------------
-        -- FOLDER MAY HAVE CHANGED
+        -- FORCE RESCAN SOMETIMES
         --------------------------------------------------
 
-        if MiningServiceClient.mineFolder
-            ~= IndexedFolder then
+        if attempt % 5 == 0 then
 
+            setupFolder()
 
-            setupMineIndex()
+            rescanFolder()
 
         end
 
 
         --------------------------------------------------
-        -- FORCE OCCASIONAL RESCAN
+        -- CHECK NEW DEEPEST LEVEL
         --------------------------------------------------
 
-        if attempt % 20 == 0 then
-
-
-            refreshIndex()
-
-        end
-
-
-        --------------------------------------------------
-        -- FIND REAL NEXT Y
-        --------------------------------------------------
-
-        local nextY =
-            getNextLoadedYBelow(
-                currentY
+        local currentDeepest =
+            deepestY(
+                NonBedrockByY,
+                nil
             )
 
 
-        if nextY then
+        if currentDeepest
+            and currentDeepest < oldDeepest then
 
-            return nextY
+            return currentDeepest
 
         end
 
 
         --------------------------------------------------
-        -- MOVE PLAYER DEEPER OCCASIONALLY
+        -- MOVE CHARACTER DOWN GRADUALLY
         --------------------------------------------------
 
-        if loaderCFrame
-            and attempt % 30 == 0 then
+        if blockCFrame
+            and attempt % 5 == 0 then
 
 
             local stage =
                 math.floor(
-                    attempt / 30
+                    attempt / 5
                 )
 
 
-            local nudge =
+            local drop =
                 math.min(
-                    stage * 2,
-                    10
+                    blockHeight * stage,
+                    MAX_STREAM_DROP
                 )
 
 
-            nudgePlayerDown(
-                loaderCFrame,
-                nudge
+            moveCharacter(
+                blockCFrame,
+                drop
             )
 
         end
 
 
         task.wait(
-            LOAD_WAIT
+            STREAM_WAIT
         )
 
     end
@@ -1582,756 +1242,571 @@ end
 
 
 --------------------------------------------------
--- WAIT FOR INITIAL LEVEL
+-- DESCENT TO START DEPTH
 --------------------------------------------------
 
-local function waitForInitialLevel(
-    runId
-)
+local function reachStartDepth(run)
 
-    for attempt = 1, LOAD_RETRIES do
+    local anchorX =
+        LOADER_X
+
+    local anchorZ =
+        LOADER_Z
 
 
-        if not isCurrentRun(runId) then
+    local failedLoads =
+        0
+
+
+    Fluent:Notify({
+
+        Title =
+            "Adaptive Loader",
+
+        Content =
+            "Searching deepest loaded blocks...",
+
+        Duration =
+            2
+
+    })
+
+
+    while isRunning(run) do
+
+
+        --------------------------------------------------
+        -- MAKE SURE FOLDER EXISTS
+        --------------------------------------------------
+
+        if not setupFolder() then
+
+            task.wait(0.1)
+
+            continue
+
+        end
+
+
+        rescanFolder()
+
+
+        --------------------------------------------------
+        -- DEEPEST ACTUAL LOADED Y
+        --------------------------------------------------
+
+        local currentY =
+            deepestY(
+                NonBedrockByY,
+                nil
+            )
+
+
+        if currentY == nil then
+
+            task.wait(0.1)
+
+            continue
+
+        end
+
+
+        --------------------------------------------------
+        -- START DEPTH REACHED
+        --------------------------------------------------
+
+        if currentY <= START_DEPTH then
+
+
+            Fluent:Notify({
+
+                Title =
+                    "Start Depth",
+
+                Content =
+                    "Reached loaded depth Y = "
+                    .. tostring(currentY),
+
+                Duration =
+                    3
+
+            })
+
+
+            return
+                currentY,
+                anchorX,
+                anchorZ
+
+        end
+
+
+        --------------------------------------------------
+        -- DEEPEST LEVEL
+        --------------------------------------------------
+
+        local bucket =
+            NonBedrockByY[
+                currentY
+            ]
+
+
+        local target =
+            getNearestBlock(
+                bucket,
+                anchorX,
+                anchorZ
+            )
+
+
+        if not target then
+
+            task.wait()
+
+            continue
+
+        end
+
+
+        --------------------------------------------------
+        -- UPDATE ANCHOR
+        --------------------------------------------------
+
+        local x, _, z =
+            getCoordinates(
+                target
+            )
+
+
+        if x ~= nil then
+            anchorX = x
+        end
+
+        if z ~= nil then
+            anchorZ = z
+        end
+
+
+        --------------------------------------------------
+        -- SAVE POSITION
+        --------------------------------------------------
+
+        local targetCFrame,
+            targetHeight =
+
+            getBlockTransform(
+                target
+            )
+
+
+        --------------------------------------------------
+        -- MINE WHATEVER IS IN THE WAY
+        --------------------------------------------------
+
+        local mined =
+            mineFast(
+                target,
+                "any",
+                run
+            )
+
+
+        if not isRunning(run) then
             return nil
         end
 
 
-        setupMineIndex()
+        --------------------------------------------------
+        -- MOVE INTO OPENED AREA
+        --------------------------------------------------
 
-        refreshIndex()
+        if mined
+            and targetCFrame then
 
-
-        local y =
-            getHighestLoadedYAtOrBelow(
+            moveCharacter(
+                targetCFrame,
                 0
             )
 
-
-        if y ~= nil then
-
-            return y
-
-        end
-
-
-        task.wait(
-            LOAD_WAIT
-        )
-
-    end
-
-
-    return nil
-
-end
-
-
---------------------------------------------------
--- MINE LOADER BLOCK
---------------------------------------------------
-
-local function mineLoaderAtLevel(
-    y,
-    preferredX,
-    preferredZ,
-    runId
-)
-
-    --------------------------------------------------
-    -- GET BEST BLOCK
-    --------------------------------------------------
-
-    local block =
-        getClosestBlockOnLevel(
-            y,
-            preferredX,
-            preferredZ
-        )
-
-
-    if not block then
-        return false, preferredX, preferredZ, nil
-    end
-
-
-    --------------------------------------------------
-    -- REMEMBER POSITION
-    --------------------------------------------------
-
-    local blockCFrame =
-        getBlockCFrame(
-            block
-        )
-
-
-    local blockX, _, blockZ =
-        getBlockCoordinates(
-            block
-        )
-
-
-    if blockX == nil then
-
-        blockX =
-            preferredX
-
-    end
-
-
-    if blockZ == nil then
-
-        blockZ =
-            preferredZ
-
-    end
-
-
-    --------------------------------------------------
-    -- MINE
-    --------------------------------------------------
-
-    local success =
-        mineAnyBlock(
-            block,
-            runId
-        )
-
-
-    if not success then
-
-        return
-            false,
-            blockX,
-            blockZ,
-            blockCFrame
-
-    end
-
-
-    --------------------------------------------------
-    -- MOVE PLAYER INTO OPENED AREA
-    --------------------------------------------------
-
-    if blockCFrame then
-
-
-        movePlayerToBlockPosition(
-            blockCFrame
-        )
-
-    end
-
-
-    return
-        true,
-        blockX,
-        blockZ,
-        blockCFrame
-
-end
-
-
---------------------------------------------------
--- REACH START DEPTH
---------------------------------------------------
-
-local function reachStartDepth(
-    runId
-)
-
-    --------------------------------------------------
-    -- GET FIRST REAL LOADED LEVEL
-    --------------------------------------------------
-
-    local currentY =
-        waitForInitialLevel(
-            runId
-        )
-
-
-    if currentY == nil then
-
-
-        Fluent:Notify({
-
-            Title =
-                "Loader Error",
-
-            Content =
-                "No mine level found.",
-
-            Duration =
-                4
-
-        })
-
-
-        return nil, nil, nil
-
-    end
-
-
-    --------------------------------------------------
-    -- LOADER POSITION
-    --------------------------------------------------
-
-    local currentX =
-        LOADER_X
-
-
-    local currentZ =
-        LOADER_Z
-
-
-    --------------------------------------------------
-    -- START IS ALREADY REACHED
-    --------------------------------------------------
-
-    if currentY <= START_DEPTH then
-
-
-        return
-            currentY,
-            currentX,
-            currentZ
-
-    end
-
-
-    --------------------------------------------------
-    -- NOTIFICATION
-    --------------------------------------------------
-
-    Fluent:Notify({
-
-        Title =
-            "Loader",
-
-        Content =
-            "Finding way to Y = "
-            .. tostring(START_DEPTH)
-            .. ".",
-
-        Duration =
-            3
-
-    })
-
-
-    --------------------------------------------------
-    -- DYNAMIC LEVEL LOOP
-    --------------------------------------------------
-
-    while currentY > START_DEPTH do
-
-
-        if not isCurrentRun(runId) then
-            return nil, nil, nil
         end
 
 
         --------------------------------------------------
-        -- MINE CURRENT LOADER BLOCK
+        -- TRY STREAMING DEEPER
         --------------------------------------------------
 
-        local success,
-            newX,
-            newZ,
-            loaderCFrame =
-
-            mineLoaderAtLevel(
+        local deeperY =
+            tryLoadDeeper(
                 currentY,
-                currentX,
-                currentZ,
-                runId
+                targetCFrame,
+                targetHeight,
+                run
             )
 
 
-        if not success then
+        if deeperY then
 
 
-            Fluent:Notify({
-
-                Title =
-                    "Loader stopped",
-
-                Content =
-                    "Could not mine loader block at Y = "
-                    .. tostring(currentY),
-
-                Duration =
-                    4
-
-            })
-
-
-            return nil, nil, nil
-
-        end
-
-
-        currentX =
-            newX
-
-
-        currentZ =
-            newZ
-
-
-        --------------------------------------------------
-        -- WAIT FOR REAL NEXT LEVEL
-        --------------------------------------------------
-
-        local nextY =
-            waitForNextLoadedY(
-                currentY,
-                runId,
-                loaderCFrame
-            )
-
-
-        if nextY == nil then
-
-
-            Fluent:Notify({
-
-                Title =
-                    "Loader stopped",
-
-                Content =
-                    "No deeper level loaded below Y = "
-                    .. tostring(currentY),
-
-                Duration =
-                    5
-
-            })
-
-
-            return nil, nil, nil
-
-        end
-
-
-        --------------------------------------------------
-        -- NEXT
-        --------------------------------------------------
-
-        currentY =
-            nextY
-
-
-        --------------------------------------------------
-        -- SMALL YIELD
-        --------------------------------------------------
-
-        task.wait()
-
-    end
-
-
-    --------------------------------------------------
-    -- ACTUAL START LEVEL
-    --------------------------------------------------
-
-    Fluent:Notify({
-
-        Title =
-            "Start Depth reached",
-
-        Content =
-            "Actual loaded level: Y = "
-            .. tostring(currentY),
-
-        Duration =
-            3
-
-    })
-
-
-    return
-        currentY,
-        currentX,
-        currentZ
-
-end
-
-
---------------------------------------------------
--- MINE COMPLETE LEVEL
---------------------------------------------------
-
-local function mineLevel(
-    y,
-    runId
-)
-
-    if not isCurrentRun(runId) then
-        return
-    end
-
-
-    if not isMiningDepth(y) then
-        return
-    end
-
-
-    local level =
-        BlocksByY[y]
-
-
-    if not level then
-        return
-    end
-
-
-    --------------------------------------------------
-    -- SNAPSHOT
-    --------------------------------------------------
-
-    local blocks = {}
-
-
-    for block in pairs(level) do
-
-
-        if block
-            and block.Parent then
-
-
-            table.insert(
-                blocks,
-                block
-            )
-
-        end
-
-    end
-
-
-    --------------------------------------------------
-    -- MINE
-    --------------------------------------------------
-
-    for _, block in ipairs(
-        blocks
-    ) do
-
-
-        if not isCurrentRun(runId) then
-            return
-        end
-
-
-        if block
-            and block.Parent then
-
-
-            local info =
-                getBlockInfo(
-                    block
-                )
-
-
-            if info then
-
-
-                --------------------------------------------------
-                -- SELECTED ORE
-                --------------------------------------------------
-
-                if isSelectedOre(info) then
-
-
-                    mineSelectedOre(
-                        block,
-                        runId
-                    )
-
-
-                --------------------------------------------------
-                -- STONE
-                --------------------------------------------------
-
-                elseif isStone(info) then
-
-
-                    mineStone(
-                        block,
-                        runId
-                    )
-
-
-                --------------------------------------------------
-                -- BEDROCK
-                --------------------------------------------------
-
-                elseif isBedrock(info) then
-
-
-                    -- Skip
-
-
-                --------------------------------------------------
-                -- OTHER ORE
-                --------------------------------------------------
-
-                else
-
-
-                    -- Nicht ausgewähltes Erz bleibt stehen.
-
-                end
-
-            end
-
-        end
-
-    end
-
-end
-
-
---------------------------------------------------
--- FULL DYNAMIC MINING
---------------------------------------------------
-
-local function mineFromStartToBottom(
-    startY,
-    loaderX,
-    loaderZ,
-    runId
-)
-
-    local currentY =
-        startY
-
-
-    local currentX =
-        loaderX
-
-
-    local currentZ =
-        loaderZ
-
-
-    --------------------------------------------------
-    -- LOOP THROUGH REAL LEVELS
-    --------------------------------------------------
-
-    while
-        currentY
-        and currentY >= MIN_DEPTH
-        and isCurrentRun(runId)
-    do
-
-
-        --------------------------------------------------
-        -- ENSURE FOLDER
-        --------------------------------------------------
-
-        if MiningServiceClient.mineFolder
-            ~= IndexedFolder then
-
-
-            setupMineIndex()
-
-        end
-
-
-        --------------------------------------------------
-        -- LOADER FIRST
-        --
-        -- This opens the path toward the next
-        -- actual loaded level.
-        --------------------------------------------------
-
-        local success,
-            newX,
-            newZ,
-            loaderCFrame =
-
-            mineLoaderAtLevel(
-                currentY,
-                currentX,
-                currentZ,
-                runId
-            )
-
-
-        if not success then
-
-
-            Fluent:Notify({
-
-                Title =
-                    "Mining stopped",
-
-                Content =
-                    "Could not open loader path at Y = "
-                    .. tostring(currentY),
-
-                Duration =
-                    4
-
-            })
-
-
-            return
-
-        end
-
-
-        currentX =
-            newX
-
-
-        currentZ =
-            newZ
-
-
-        --------------------------------------------------
-        -- START LOADING NEXT LEVEL
-        --------------------------------------------------
-
-        local nextY =
-            nil
-
-
-        if currentY > MIN_DEPTH then
-
-
-            nextY =
-                waitForNextLoadedY(
-                    currentY,
-                    runId,
-                    loaderCFrame
-                )
-
-        end
-
-
-        --------------------------------------------------
-        -- MINE COMPLETE CURRENT LEVEL
-        --------------------------------------------------
-
-        mineLevel(
-            currentY,
-            runId
-        )
-
-
-        if not isCurrentRun(runId) then
-            return
-        end
-
-
-        --------------------------------------------------
-        -- FINISHED / NO DEEPER LEVEL
-        --------------------------------------------------
-
-        if nextY == nil then
-
-
-            Fluent:Notify({
-
-                Title =
-                    "Deepest loaded level",
-
-                Content =
-                    "No level found below Y = "
-                    .. tostring(currentY),
-
-                Duration =
-                    4
-
-            })
-
-
-            return
-
-        end
-
-
-        --------------------------------------------------
-        -- NEXT REAL LEVEL
-        --------------------------------------------------
-
-        currentY =
-            nextY
-
-
-        task.wait()
-
-    end
-
-end
-
-
---------------------------------------------------
--- GET NEXT SELECTED ORE
---------------------------------------------------
-
-local function getNextSelectedOre()
-
-    for block in pairs(
-        SelectedOreBlocks
-    ) do
-
-
-        --------------------------------------------------
-        -- REMOVED
-        --------------------------------------------------
-
-        if not block
-            or not block.Parent then
-
-
-            SelectedOreBlocks[block] =
-                nil
+            failedLoads =
+                0
 
 
         else
 
 
+            --------------------------------------------------
+            -- IMPORTANT:
+            -- DON'T STOP.
+            --
+            -- Mine another block on the same frontier.
+            --------------------------------------------------
+
+            failedLoads =
+                failedLoads + 1
+
+
+            --------------------------------------------------
+            -- MORE AGGRESSIVE STREAM PROBE
+            --------------------------------------------------
+
+            if targetCFrame
+                and failedLoads % 3 == 0 then
+
+
+                moveCharacter(
+                    targetCFrame,
+                    math.min(
+                        12
+                        + failedLoads * 2,
+                        MAX_STREAM_DROP
+                    )
+                )
+
+
+                task.wait(0.1)
+
+                rescanFolder()
+
+            end
+
+        end
+
+    end
+
+
+    return nil
+
+end
+
+
+--------------------------------------------------
+-- GET DEEPEST SELECTED ORE
+--------------------------------------------------
+
+local function getSelectedTarget()
+
+    local y =
+        deepestY(
+            SelectedByY,
+            START_DEPTH
+        )
+
+
+    if not y then
+        return nil
+    end
+
+
+    return
+        getAnyBlock(
+            SelectedByY[y]
+        )
+
+end
+
+
+--------------------------------------------------
+-- GET DEEPEST STONE
+--------------------------------------------------
+
+local function getStoneTarget()
+
+    local y =
+        deepestY(
+            StoneByY,
+            START_DEPTH
+        )
+
+
+    if not y then
+        return nil
+    end
+
+
+    return
+        getAnyBlock(
+            StoneByY[y]
+        )
+
+end
+
+
+--------------------------------------------------
+-- FRONTIER TARGET
+--------------------------------------------------
+
+local function getFrontierTarget(
+    anchorX,
+    anchorZ
+)
+
+    local y =
+        deepestY(
+            NonBedrockByY,
+            nil
+        )
+
+
+    if not y then
+        return nil, nil
+    end
+
+
+    local target =
+        getNearestBlock(
+            NonBedrockByY[y],
+            anchorX,
+            anchorZ
+        )
+
+
+    return
+        target,
+        y
+
+end
+
+
+--------------------------------------------------
+-- MAIN MINING LOOP
+--------------------------------------------------
+
+local function miningLoop(
+    run,
+    anchorX,
+    anchorZ
+)
+
+    local workCounter =
+        0
+
+
+    while isRunning(run) do
+
+
+        --------------------------------------------------
+        -- FOLDER CHECK
+        --------------------------------------------------
+
+        if MiningServiceClient.mineFolder
+            ~= IndexedFolder then
+
+            setupFolder()
+
+        end
+
+
+        --------------------------------------------------
+        -- SELECTED ORES FIRST
+        --------------------------------------------------
+
+        local target =
+            getSelectedTarget()
+
+
+        local mode =
+            "selected"
+
+
+        --------------------------------------------------
+        -- THEN STONE
+        --------------------------------------------------
+
+        if not target then
+
+            target =
+                getStoneTarget()
+
+            mode =
+                "stone"
+
+        end
+
+
+        --------------------------------------------------
+        -- NORMAL WORK
+        --------------------------------------------------
+
+        if target then
+
+
             local y =
-                BlockYCache[block]
-                or getBlockY(block)
+                BlockYCache[target]
+                or getBlockY(target)
+
+
+            local cframe,
+                height =
+
+                getBlockTransform(
+                    target
+                )
+
+
+            mineFast(
+                target,
+                mode,
+                run
+            )
+
+
+            if not isRunning(run) then
+                return
+            end
+
+
+            workCounter =
+                workCounter + 1
 
 
             --------------------------------------------------
-            -- WRONG DEPTH
+            -- FOLLOW DEEPEST AREA
             --------------------------------------------------
 
-            if not isMiningDepth(y) then
-
-
-                SelectedOreBlocks[block] =
+            local deepest =
+                deepestY(
+                    NonBedrockByY,
                     nil
+                )
+
+
+            if cframe
+                and y
+                and deepest
+                and y <= deepest then
+
+
+                moveCharacter(
+                    cframe,
+                    0
+                )
+
+            end
+
+
+            --------------------------------------------------
+            -- PERIODICALLY TRY LOADING DEEPER
+            --------------------------------------------------
+
+            if workCounter % 20 == 0
+                and deepest
+                and deepest > MIN_DEPTH then
+
+
+                tryLoadDeeper(
+                    deepest,
+                    cframe,
+                    height,
+                    run
+                )
+
+            end
+
+
+        else
+
+
+            --------------------------------------------------
+            -- NOTHING SELECTED/STONE LOADED.
+            --
+            -- OPEN THE DEEPEST FRONTIER.
+            --------------------------------------------------
+
+            local frontier,
+                frontierY =
+
+                getFrontierTarget(
+                    anchorX,
+                    anchorZ
+                )
+
+
+            if frontier
+                and frontierY then
+
+
+                local x, _, z =
+                    getCoordinates(
+                        frontier
+                    )
+
+
+                if x ~= nil then
+                    anchorX = x
+                end
+
+                if z ~= nil then
+                    anchorZ = z
+                end
+
+
+                local cframe,
+                    height =
+
+                    getBlockTransform(
+                        frontier
+                    )
+
+
+                local mined =
+                    mineFast(
+                        frontier,
+                        "any",
+                        run
+                    )
+
+
+                if mined
+                    and cframe then
+
+
+                    moveCharacter(
+                        cframe,
+                        0
+                    )
+
+
+                    tryLoadDeeper(
+                        frontierY,
+                        cframe,
+                        height,
+                        run
+                    )
+
+                end
 
 
             else
 
 
-                local info =
-                    getBlockInfo(block)
+                --------------------------------------------------
+                -- NO CURRENT BLOCKS.
+                -- KEEP WAITING FOR STREAMING.
+                --------------------------------------------------
 
+                rescanFolder()
 
-                if not info
-                    or not isSelectedOre(info) then
-
-
-                    SelectedOreBlocks[block] =
-                        nil
-
-
-                else
-
-
-                    return block
-
-                end
+                task.wait(0.1)
 
             end
 
@@ -2339,84 +1814,26 @@ local function getNextSelectedOre()
 
     end
 
-
-    return nil
-
 end
 
 
 --------------------------------------------------
--- CONTINUOUS ORE MINING
+-- START MINING
 --------------------------------------------------
 
-local function selectedOreMining(
-    runId
-)
-
-    while isCurrentRun(runId) do
-
-
-        --------------------------------------------------
-        -- CHECK FOLDER
-        --------------------------------------------------
-
-        if MiningServiceClient.mineFolder
-            ~= IndexedFolder then
-
-
-            setupMineIndex()
-
-        end
-
-
-        --------------------------------------------------
-        -- TARGET
-        --------------------------------------------------
-
-        local target =
-            getNextSelectedOre()
-
-
-        if target then
-
-
-            mineSelectedOre(
-                target,
-                runId
-            )
-
-
-        else
-
-
-            task.wait(0.1)
-
-        end
-
-    end
-
-end
-
-
---------------------------------------------------
--- START MINER
---------------------------------------------------
-
-local function startMining(
-    runId
-)
+local function startMining(run)
 
     task.spawn(function()
 
 
         --------------------------------------------------
-        -- WAIT FOR MINE
+        -- WAIT FOR MINE FOLDER
         --------------------------------------------------
 
-        while isCurrentRun(runId) do
+        while isRunning(run) do
 
 
-            if setupMineIndex() then
+            if setupFolder() then
                 break
             end
 
@@ -2426,77 +1843,51 @@ local function startMining(
         end
 
 
-        if not isCurrentRun(runId) then
+        if not isRunning(run) then
             return
         end
 
 
-        --------------------------------------------------
-        -- CACHE
-        --------------------------------------------------
-
-        rebuildSelectedOreCache()
+        rebuildSelectedIndex()
 
 
         --------------------------------------------------
-        -- PHASE 1:
-        -- REACH REQUESTED DEPTH
+        -- STEP 1:
+        -- ADAPTIVELY REACH START DEPTH
         --------------------------------------------------
 
-        local actualStartY,
-            loaderX,
-            loaderZ =
+        local actualY,
+            anchorX,
+            anchorZ =
 
             reachStartDepth(
-                runId
+                run
             )
 
 
-        if actualStartY == nil then
+        if actualY == nil
+            or not isRunning(run) then
+
             return
+
         end
 
 
-        if not isCurrentRun(runId) then
-            return
-        end
-
-
         --------------------------------------------------
-        -- REFRESH AFTER NEW LEVELS LOADED
+        -- STEP 2:
+        -- MINE EVERYTHING LOADED BELOW START DEPTH
         --------------------------------------------------
 
-        refreshIndex()
+        rescanFolder()
 
-        rebuildSelectedOreCache()
+        rebuildSelectedIndex()
 
 
-        --------------------------------------------------
-        -- PHASE 2:
-        -- FULL LEVEL MINING
-        --------------------------------------------------
-
-        mineFromStartToBottom(
-            actualStartY,
-            loaderX,
-            loaderZ,
-            runId
+        miningLoop(
+            run,
+            anchorX,
+            anchorZ
         )
-
-
-        --------------------------------------------------
-        -- PHASE 3:
-        -- KEEP MINING SELECTED ORES
-        --------------------------------------------------
-
-        if isCurrentRun(runId) then
-
-
-            selectedOreMining(
-                runId
-            )
-
-        end
 
     end)
 
@@ -2516,15 +1907,11 @@ for id, data in pairs(
 
 
     if id
-
         and not string.match(
             id,
             "^StoneOre%d*$"
         )
-
-        and id ~= "Bedrock"
-
-    then
+        and id ~= "Bedrock" then
 
 
         local displayName =
@@ -2559,7 +1946,7 @@ table.sort(
 
 
 --------------------------------------------------
--- SELECT ORES
+-- ORE DROPDOWN
 --------------------------------------------------
 
 local MultiDropdown =
@@ -2571,7 +1958,7 @@ local MultiDropdown =
                 "Select Ores",
 
             Description =
-                "Choose which ores to mine.",
+                "Selected ores have priority.",
 
             Values =
                 OreValues,
@@ -2587,7 +1974,7 @@ local MultiDropdown =
 
 
 --------------------------------------------------
--- ORE CHANGED
+-- ORE SELECTION CHANGED
 --------------------------------------------------
 
 MultiDropdown:OnChanged(
@@ -2645,14 +2032,14 @@ MultiDropdown:OnChanged(
         end
 
 
-        rebuildSelectedOreCache()
+        rebuildSelectedIndex()
 
     end
 )
 
 
 --------------------------------------------------
--- START DEPTH INPUT
+-- START DEPTH
 --------------------------------------------------
 
 Tabs.Main:AddInput(
@@ -2663,7 +2050,7 @@ Tabs.Main:AddInput(
             "Start Depth",
 
         Description =
-            "Loader goes down before full mining starts.",
+            "Full mining starts from this depth.",
 
         Default =
             "0",
@@ -2678,17 +2065,11 @@ Tabs.Main:AddInput(
             true,
 
         Callback =
-            function(Value)
+            function(value)
 
-
-                --------------------------------------------------
-                -- NUMBER
-                --------------------------------------------------
 
                 local number =
-                    tonumber(
-                        Value
-                    )
+                    tonumber(value)
 
 
                 if number == nil then
@@ -2700,10 +2081,10 @@ Tabs.Main:AddInput(
                             "Start Depth",
 
                         Content =
-                            "Enter something like -3000.",
+                            "Example: -3000",
 
                         Duration =
-                            3
+                            2
 
                     })
 
@@ -2713,21 +2094,11 @@ Tabs.Main:AddInput(
                 end
 
 
-                --------------------------------------------------
-                -- INTEGER
-                --------------------------------------------------
-
                 number =
-                    math.round(
-                        number
-                    )
+                    math.round(number)
 
 
-                --------------------------------------------------
-                -- LIMIT
-                --------------------------------------------------
-
-                number =
+                START_DEPTH =
                     math.clamp(
                         number,
                         MIN_DEPTH,
@@ -2735,20 +2106,8 @@ Tabs.Main:AddInput(
                     )
 
 
-                --------------------------------------------------
-                -- SAVE
-                --------------------------------------------------
+                rebuildSelectedIndex()
 
-                START_DEPTH =
-                    number
-
-
-                rebuildSelectedOreCache()
-
-
-                --------------------------------------------------
-                -- NOTIFY
-                --------------------------------------------------
 
                 Fluent:Notify({
 
@@ -2756,37 +2115,108 @@ Tabs.Main:AddInput(
                         "Start Depth",
 
                     Content =
-                        "Target depth: Y = "
+                        "Start Depth = "
                         .. tostring(
                             START_DEPTH
                         ),
 
                     Duration =
-                        3
+                        2
 
                 })
 
 
                 --------------------------------------------------
-                -- RESTART RUN IF ACTIVE
+                -- RESTART MINER WITH NEW DEPTH
                 --------------------------------------------------
 
                 if AutoMine then
 
 
-                    MiningRunId =
-                        MiningRunId + 1
+                    RunId =
+                        RunId + 1
 
 
-                    local runId =
-                        MiningRunId
+                    local newRun =
+                        RunId
 
 
                     startMining(
-                        runId
+                        newRun
                     )
 
                 end
+
+            end
+
+    }
+)
+
+
+--------------------------------------------------
+-- SPEED INPUT
+--------------------------------------------------
+
+Tabs.Main:AddInput(
+    "DamageBurst",
+    {
+
+        Title =
+            "Hits Per Cycle",
+
+        Description =
+            "Higher = more damage calls per tick.",
+
+        Default =
+            tostring(
+                DAMAGE_BURST
+            ),
+
+        Placeholder =
+            "10",
+
+        Numeric =
+            true,
+
+        Finished =
+            true,
+
+        Callback =
+            function(value)
+
+
+                local number =
+                    tonumber(value)
+
+
+                if not number then
+                    return
+                end
+
+
+                DAMAGE_BURST =
+                    math.clamp(
+                        math.floor(number),
+                        1,
+                        50
+                    )
+
+
+                Fluent:Notify({
+
+                    Title =
+                        "Mining Speed",
+
+                    Content =
+                        "Hits Per Cycle = "
+                        .. tostring(
+                            DAMAGE_BURST
+                        ),
+
+                    Duration =
+                        2
+
+                })
 
             end
 
@@ -2807,7 +2237,7 @@ local Toggle =
                 "Auto Mine",
 
             Description =
-                "Dynamic loader + full level mining.",
+                "Adaptive depth loading + fast mining.",
 
             Default =
                 false
@@ -2824,27 +2254,19 @@ Toggle:OnChanged(
     function(value)
 
 
-        --------------------------------------------------
-        -- KILL PREVIOUS RUN
-        --------------------------------------------------
-
-        MiningRunId =
-            MiningRunId + 1
+        RunId =
+            RunId + 1
 
 
         AutoMine =
             value
 
 
-        --------------------------------------------------
-        -- START
-        --------------------------------------------------
-
         if AutoMine then
 
 
-            local runId =
-                MiningRunId
+            local run =
+                RunId
 
 
             Fluent:Notify({
@@ -2853,25 +2275,21 @@ Toggle:OnChanged(
                     "Auto Mine",
 
                 Content =
-                    "Target Start Depth: "
+                    "Target depth: "
                     .. tostring(
                         START_DEPTH
                     ),
 
                 Duration =
-                    3
+                    2
 
             })
 
 
             startMining(
-                runId
+                run
             )
 
-
-        --------------------------------------------------
-        -- STOP
-        --------------------------------------------------
 
         else
 
@@ -2882,7 +2300,7 @@ Toggle:OnChanged(
                     "Auto Mine",
 
                 Content =
-                    "Mining stopped.",
+                    "Stopped.",
 
                 Duration =
                     2
@@ -2902,7 +2320,6 @@ Toggle:OnChanged(
 SaveManager:SetLibrary(
     Fluent
 )
-
 
 InterfaceManager:SetLibrary(
     Fluent
