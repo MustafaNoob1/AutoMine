@@ -1,4 +1,4 @@
-warn("[SmartOreMiner] SMART V4 loaded")
+warn("[SmartOreMiner] SMART V4 UIFIX loaded")
 
 -- Smart Ore Miner V4
 -- Features:
@@ -61,6 +61,22 @@ local Tabs = {
     Stats = Window:AddTab({ Title = "Stats", Icon = "bar-chart-3" }),
     Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
 }
+
+-- Select a tab immediately. In V4 this used to happen only at the very end.
+-- If any later startup code stopped, Fluent showed the tab buttons but no page.
+pcall(function()
+    Window:SelectTab(1)
+end)
+
+local StartupDisplay = nil
+pcall(function()
+    StartupDisplay = Tabs.Main:AddParagraph({
+        Title = "Smart Ore Miner V4",
+        Content = "Loading controls..."
+    })
+end)
+
+warn("[SmartOreMiner] UI shell ready")
 
 --------------------------------------------------
 -- SERVICES
@@ -1092,7 +1108,12 @@ local OreDisplayToId = {}
 local OreSelectionPreference = {}
 local SelectedOres = {}
 
-local function buildOreDisplayMaps()
+local function do
+    local ok, err = pcall(buildOreDisplayMaps)
+    if not ok then
+        warn("[SmartOreMiner] buildOreDisplayMaps failed:", err)
+    end
+end
     OreIdToDisplay = {}
     OreDisplayToId = {}
 
@@ -2670,9 +2691,35 @@ end
 --------------------------------------------------
 -- INITIAL RANK + ORE VALUES
 --------------------------------------------------
-refreshRankDepth()
+do
+    local ok, err = pcall(refreshRankDepth)
+    if not ok then
+        warn("[SmartOreMiner] initial rank refresh failed:", err)
+        RANK_MAX_DEPTH = MIN_DEPTH
+    end
+end
 
-local initialAvailableIds = getAvailableOreIdsForRange()
+local initialAvailableIds = {}
+do
+    local ok, result = pcall(getAvailableOreIdsForRange)
+    if ok and type(result) == "table" then
+        initialAvailableIds = result
+    else
+        warn("[SmartOreMiner] initial ore-range scan failed:", result)
+    end
+end
+
+-- Fallback: never let the first Fluent ore list be built from a broken/empty
+-- range scan. This also makes startup robust if private layer data is late.
+if #initialAvailableIds == 0 then
+    for id in pairs(OreIdToDisplay) do
+        table.insert(initialAvailableIds, tostring(id))
+    end
+    table.sort(initialAvailableIds, function(a, b)
+        return tostring(OreIdToDisplay[a] or a) < tostring(OreIdToDisplay[b] or b)
+    end)
+end
+
 local initialOreValues = {}
 
 for _, id in ipairs(initialAvailableIds) do
@@ -2680,12 +2727,14 @@ for _, id in ipairs(initialAvailableIds) do
     SelectedOres[id] = true
     local displayName = OreIdToDisplay[id]
     if displayName then
-        table.insert(initialOreValues, displayName)
+        table.insert(initialOreValues, tostring(displayName))
     end
 end
 
 table.sort(initialOreValues)
 VisibleOreDisplayNames = initialOreValues
+
+warn("[SmartOreMiner] startup data ready | ores:", #initialOreValues)
 
 --------------------------------------------------
 -- SMART PROFILES / AUTO DEPTH
@@ -3686,4 +3735,12 @@ updateRankDisplay()
 updateStatsDisplay()
 updateProgressDisplay()
 updateProgressionDisplay()
+
+pcall(function()
+    if StartupDisplay then
+        StartupDisplay:SetDesc("Ready")
+    end
+end)
+
 Window:SelectTab(1)
+warn("[SmartOreMiner] SMART V4 UIFIX ready")
