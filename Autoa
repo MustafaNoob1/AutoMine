@@ -1,6 +1,7 @@
-
+warn("[SmartOreMiner] SMART V4 FIX6 COMPAT loaded")
 
 -- Smart Ore Miner V4
+-- FIX6 COMPAT: reduces top-level local variables to avoid executor/Luau local-register compile limits.
 -- Features:
 --  * Rank-aware depth limit
 --  * Start / End depth range
@@ -101,79 +102,79 @@ warn("[SmartOreMiner] stage 6 OK")
 --------------------------------------------------
 -- SETTINGS / STATE
 --------------------------------------------------
-local AutoMine = false
-local MIN_DEPTH = -4999
-local START_DEPTH = 0
-local END_DEPTH = MIN_DEPTH
-local RANK_MAX_DEPTH = MIN_DEPTH
+AutoMine = false
+MIN_DEPTH = -4999
+START_DEPTH = 0
+END_DEPTH = MIN_DEPTH
+RANK_MAX_DEPTH = MIN_DEPTH
 
-local FOLLOW_TARGET = true
-local TARGET_DISTANCE = 25
-local DEFAULT_X = 9
-local DEFAULT_Z = 9
-local STALL_LIMIT = 8
+FOLLOW_TARGET = true
+TARGET_DISTANCE = 25
+DEFAULT_X = 9
+DEFAULT_Z = 9
+STALL_LIMIT = 8
 
-local PRIORITY_MODE = "Smart"
-local SWEEP_MODE = "Full Layer"
+PRIORITY_MODE = "Smart"
+SWEEP_MODE = "Full Layer"
 
 -- Smart automation. Manual keeps the exact Start / End inputs.
-local FARM_PROFILE = "Custom"
-local AUTO_DEPTH_MODE = "Manual"
-local SMART_RANK_GRIND = false
-local SYSTEMATIC_SWEEP = true
-local AUTO_RESUME = true
+FARM_PROFILE = "Custom"
+AUTO_DEPTH_MODE = "Manual"
+SMART_RANK_GRIND = false
+SYSTEMATIC_SWEEP = true
+AUTO_RESUME = true
 
 -- Economy / progression automation.
 -- These use the same normal client network calls as the game's Sell,
 -- Mining Upgrades and Mining Rank UI.
-local AUTO_SELL_ORES = false
-local AUTO_SELL_INTERVAL = 15
-local AUTO_BUCKS_UPGRADE = false
-local AUTO_RANK_UP = false
-local PROGRESSION_PRIORITY = "Smart"
-local PROGRESSION_TICK_SECONDS = 1
-local PROGRESSION_BUY_DELAY = 0.20
-local PROGRESSION_MAX_UPGRADES_PER_TICK = 3
+AUTO_SELL_ORES = false
+AUTO_SELL_INTERVAL = 15
+AUTO_BUCKS_UPGRADE = false
+AUTO_RANK_UP = false
+PROGRESSION_PRIORITY = "Smart"
+PROGRESSION_TICK_SECONDS = 1
+PROGRESSION_BUY_DELAY = 0.20
+PROGRESSION_MAX_UPGRADES_PER_TICK = 3
 
-local ProgressionBusy = false
-local LastAutoSellAt = -math.huge
-local LastProgressionAction = "-"
-local LastProgressionError = "-"
+ProgressionBusy = false
+LastAutoSellAt = -math.huge
+LastProgressionAction = "-"
+LastProgressionError = "-"
 
-local RARE_ALERT_ENABLED = true
-local RARE_PRIORITY_OVERRIDE = true
-local RARE_WEIGHT_THRESHOLD = 0.005
+RARE_ALERT_ENABLED = true
+RARE_PRIORITY_OVERRIDE = true
+RARE_WEIGHT_THRESHOLD = 0.005
 
-local AUTO_RESET_MINE = false
-local SMART_RESET = false
-local SMART_RESET_PROGRESS = 0.85
-local SMART_RESET_IDLE_SECONDS = 25
-local SMART_RESET_MIN_BLOCKS = 60
-local SMART_RESET_MAX_CYCLE_SECONDS = 240
+AUTO_RESET_MINE = false
+SMART_RESET = false
+SMART_RESET_PROGRESS = 0.85
+SMART_RESET_IDLE_SECONDS = 25
+SMART_RESET_MIN_BLOCKS = 60
+SMART_RESET_MAX_CYCLE_SECONDS = 240
 
-local STOP_AFTER_MINUTES_ENABLED = false
-local STOP_AFTER_MINUTES = 30
-local STOP_AFTER_ORES_ENABLED = false
-local STOP_AFTER_ORES = 1000
-local STOP_AFTER_VALUE_ENABLED = false
-local STOP_AFTER_VALUE = 10e9
-local STOP_ON_RARE_ENABLED = false
+STOP_AFTER_MINUTES_ENABLED = false
+STOP_AFTER_MINUTES = 30
+STOP_AFTER_ORES_ENABLED = false
+STOP_AFTER_ORES = 1000
+STOP_AFTER_VALUE_ENABLED = false
+STOP_AFTER_VALUE = 10e9
+STOP_ON_RARE_ENABLED = false
 
-local RunId = 0
-local BlockedTargets = {}
-local AlertedRareBlocks = {}
-local IsResetting = false
-local ApplyingProfile = false
-local AutoResumePending = false
-local LastObservedMineFolder = nil
+RunId = 0
+BlockedTargets = {}
+AlertedRareBlocks = {}
+IsResetting = false
+ApplyingProfile = false
+AutoResumePending = false
+LastObservedMineFolder = nil
 
-local CycleStartTime = nil
-local CycleStartBlocks = 0
-local CycleStartOres = 0
-local LastOreMinedAt = nil
+CycleStartTime = nil
+CycleStartBlocks = 0
+CycleStartOres = 0
+LastOreMinedAt = nil
 
-local AutoMineToggle = nil
-local InternalToggleChange = false
+AutoMineToggle = nil
+InternalToggleChange = false
 
 --------------------------------------------------
 -- STATS
@@ -205,31 +206,31 @@ local CycleMinedByDepth = {}
 --------------------------------------------------
 -- UI FORWARD REFERENCES
 --------------------------------------------------
-local OreDropdown = nil
-local RankDisplay = nil
-local StatsDisplay = nil
-local ProgressDisplay = nil
-local updateRankDisplay = nil
-local updateStatsDisplay = nil
-local updateProgressDisplay = nil
-local refreshOreDropdownForRange = nil
-local SuppressOreDropdownCallback = false
-local VisibleOreDisplayNames = {}
-local ProfileDropdown = nil
-local AutoDepthDropdown = nil
-local PriorityDropdown = nil
-local SweepDropdown = nil
-local AutoResetToggle = nil
-local SmartResetToggle = nil
-local SystematicSweepToggle = nil
-local AutoResumeToggle = nil
-local SmartRankToggle = nil
-local ProgressionDisplay = nil
-local updateProgressionDisplay = nil
-local AutoSellToggle = nil
-local AutoBucksUpgradeToggle = nil
-local AutoRankToggle = nil
-local ProgressionPriorityDropdown = nil
+OreDropdown = nil
+RankDisplay = nil
+StatsDisplay = nil
+ProgressDisplay = nil
+updateRankDisplay = nil
+updateStatsDisplay = nil
+updateProgressDisplay = nil
+refreshOreDropdownForRange = nil
+SuppressOreDropdownCallback = false
+VisibleOreDisplayNames = {}
+ProfileDropdown = nil
+AutoDepthDropdown = nil
+PriorityDropdown = nil
+SweepDropdown = nil
+AutoResetToggle = nil
+SmartResetToggle = nil
+SystematicSweepToggle = nil
+AutoResumeToggle = nil
+SmartRankToggle = nil
+ProgressionDisplay = nil
+updateProgressionDisplay = nil
+AutoSellToggle = nil
+AutoBucksUpgradeToggle = nil
+AutoRankToggle = nil
+ProgressionPriorityDropdown = nil
 
 --------------------------------------------------
 -- HELPERS
@@ -3718,4 +3719,4 @@ updateStatsDisplay()
 updateProgressDisplay()
 updateProgressionDisplay()
 Window:SelectTab(1)
-warn("[SmartOreMiner] SMART V4 FIX5 STABLE ready")
+warn("[SmartOreMiner] SMART V4 FIX6 COMPAT ready")
