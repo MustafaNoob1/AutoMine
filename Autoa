@@ -1,4 +1,4 @@
-warn("[SmartOreMiner] SMART V4 FIX2 loaded")
+warn("[SmartOreMiner] SMART V4 FIX3 loaded")
 
 -- Smart Ore Miner V4
 -- Features:
@@ -82,9 +82,22 @@ warn("[SmartOreMiner] starting game module load")
 --------------------------------------------------
 -- SERVICES
 --------------------------------------------------
-local Players = cloneref(game:GetService("Players"))
-local Rs = cloneref(game:GetService("ReplicatedStorage"))
+-- Some executors (including some Delta builds) expose no cloneref().
+-- Falling back to the original Instance is completely fine for this script.
+local function safeCloneRef(value)
+    if type(cloneref) == "function" then
+        local ok, result = pcall(cloneref, value)
+        if ok and result ~= nil then
+            return result
+        end
+    end
+    return value
+end
+
+local Players = safeCloneRef(game:GetService("Players"))
+local Rs = safeCloneRef(game:GetService("ReplicatedStorage"))
 local LocalPlayer = Players.LocalPlayer
+warn("[SmartOreMiner] services ready | cloneref:", type(cloneref))
 
 --------------------------------------------------
 -- GAME MODULES
@@ -92,17 +105,29 @@ local LocalPlayer = Players.LocalPlayer
 local MiningServiceClient = require(
     Rs.Shared.Services.MiningService.MiningServiceClient
 )
+warn("[SmartOreMiner] MiningServiceClient ready")
 
 local Info = require(Rs.Packages.Info)
 local MiningInfo = Info.MiningInfo
 local UpgradeInfo = Info.UpgradeInfo
+warn("[SmartOreMiner] Info ready")
+
 local BlocksData = require(Rs.Shared.Info.MiningInfo.Blocks)
+warn("[SmartOreMiner] BlocksData ready")
+
 local MiningUpgradesData = require(
     Rs.Shared.Info.UpgradeInfo.UpgradeTypes.MiningUpgrades
 )
+warn("[SmartOreMiner] MiningUpgradesData ready")
+
 local DataClient = require(Rs.Packages.DataService).client
+warn("[SmartOreMiner] DataClient ready")
+
 local Utils = require(Rs.Packages.Utils)
+warn("[SmartOreMiner] Utils ready")
+
 local EternityNum = require(Rs.Packages.EternityNum)
+warn("[SmartOreMiner] EternityNum ready")
 warn("[SmartOreMiner] game modules ready")
 
 --------------------------------------------------
@@ -3745,4 +3770,4 @@ pcall(function()
 end)
 
 Window:SelectTab(1)
-warn("[SmartOreMiner] SMART V4 FIX2 ready")
+warn("[SmartOreMiner] SMART V4 FIX3 ready")
