@@ -1936,12 +1936,22 @@ VisibleOreDisplayNames = initialOreValues
 --------------------------------------------------
 -- MAIN UI: ORES
 --------------------------------------------------
+-- IMPORTANT FLUENT FIX:
+-- Keep Values and Default as separate tables.
+-- Using the same table for both can make some Fluent builds mutate
+-- the Values array into a boolean selection map while constructing it,
+-- which causes: Text string expected, got boolean.
+local initialOreDropdownValues = {}
+for _, displayName in ipairs(initialOreValues) do
+    table.insert(initialOreDropdownValues, tostring(displayName))
+end
+
 OreDropdown = Tabs.Main:AddDropdown("OreSelection", {
     Title = "Select Ores",
     Description = "Only ores/blocks that can spawn in the selected depth range are shown.",
-    Values = initialOreValues,
+    Values = initialOreDropdownValues,
     Multi = true,
-    Default = initialOreValues
+    Default = {}
 })
 
 OreDropdown:OnChanged(function(values)
@@ -1967,6 +1977,25 @@ OreDropdown:OnChanged(function(values)
     local availableIds = getAvailableOreIdsForRange()
     rebuildSelectedOresFromPreferences(availableIds)
     rebuildSelectedIndex()
+end)
+
+-- Select every currently available ore AFTER the dropdown exists.
+-- Fluent expects SetValue() for a Multi dropdown to receive
+-- a map like { ["Diamond"] = true, ["Emerald"] = true }.
+task.defer(function()
+    local initialSelectionMap = {}
+
+    for _, displayName in ipairs(initialOreDropdownValues) do
+        initialSelectionMap[tostring(displayName)] = true
+    end
+
+    SuppressOreDropdownCallback = true
+
+    pcall(function()
+        OreDropdown:SetValue(initialSelectionMap)
+    end)
+
+    SuppressOreDropdownCallback = false
 end)
 
 local PriorityDropdown = Tabs.Main:AddDropdown("PriorityMode", {
