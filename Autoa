@@ -1,4 +1,4 @@
-warn("[SmartOreMiner] SMART V4 FIX3 loaded")
+warn("[SmartOreMiner] SMART V4 FIX4 TRACE loaded")
 
 -- Smart Ore Miner V4
 -- Features:
@@ -46,7 +46,7 @@ local InterfaceManager = loadstring(game:HttpGet(
 --------------------------------------------------
 local Window = Fluent:CreateWindow({
     Title = "Fluent " .. Fluent.Version,
-    SubTitle = "Smart Ore Miner V4",
+    SubTitle = "Smart Ore Miner V4 FIX4",
     TabWidth = 160,
     Size = UDim2.fromOffset(650, 590),
     Acrylic = true,
@@ -71,12 +71,15 @@ end)
 local StartupDisplay = nil
 pcall(function()
     StartupDisplay = Tabs.Main:AddParagraph({
-        Title = "Smart Ore Miner V4",
-        Content = "Loading controls..."
+        Title = "Smart Ore Miner V4 FIX4",
+        Content = "TRACE MODE - loading..."
     })
 end)
 
 warn("[SmartOreMiner] UI shell ready")
+local __stage = "after UI shell"
+local __ok, __err = xpcall(function()
+__stage = "starting game module load"
 warn("[SmartOreMiner] starting game module load")
 
 --------------------------------------------------
@@ -94,7 +97,9 @@ local function safeCloneRef(value)
     return value
 end
 
+__stage = "GetService Players"
 local Players = safeCloneRef(game:GetService("Players"))
+__stage = "GetService ReplicatedStorage"
 local Rs = safeCloneRef(game:GetService("ReplicatedStorage"))
 local LocalPlayer = Players.LocalPlayer
 warn("[SmartOreMiner] services ready | cloneref:", type(cloneref))
@@ -102,30 +107,37 @@ warn("[SmartOreMiner] services ready | cloneref:", type(cloneref))
 --------------------------------------------------
 -- GAME MODULES
 --------------------------------------------------
+__stage = "require MiningServiceClient"
 local MiningServiceClient = require(
     Rs.Shared.Services.MiningService.MiningServiceClient
 )
 warn("[SmartOreMiner] MiningServiceClient ready")
 
+__stage = "require Packages.Info"
 local Info = require(Rs.Packages.Info)
 local MiningInfo = Info.MiningInfo
 local UpgradeInfo = Info.UpgradeInfo
 warn("[SmartOreMiner] Info ready")
 
+__stage = "require BlocksData"
 local BlocksData = require(Rs.Shared.Info.MiningInfo.Blocks)
 warn("[SmartOreMiner] BlocksData ready")
 
+__stage = "require MiningUpgradesData"
 local MiningUpgradesData = require(
     Rs.Shared.Info.UpgradeInfo.UpgradeTypes.MiningUpgrades
 )
 warn("[SmartOreMiner] MiningUpgradesData ready")
 
+__stage = "require DataService"
 local DataClient = require(Rs.Packages.DataService).client
 warn("[SmartOreMiner] DataClient ready")
 
+__stage = "require Utils"
 local Utils = require(Rs.Packages.Utils)
 warn("[SmartOreMiner] Utils ready")
 
+__stage = "require EternityNum"
 local EternityNum = require(Rs.Packages.EternityNum)
 warn("[SmartOreMiner] EternityNum ready")
 warn("[SmartOreMiner] game modules ready")
@@ -1135,7 +1147,8 @@ local OreDisplayToId = {}
 local OreSelectionPreference = {}
 local SelectedOres = {}
 
-local function buildOreDisplayMaps()
+local function __stage = "buildOreDisplayMaps"
+buildOreDisplayMaps()
     OreIdToDisplay = {}
     OreDisplayToId = {}
 
@@ -2761,11 +2774,13 @@ end
 table.sort(initialOreValues)
 VisibleOreDisplayNames = initialOreValues
 
+__stage = "startup data ready"
 warn("[SmartOreMiner] startup data ready | ores:", #initialOreValues)
 
 --------------------------------------------------
 -- SMART PROFILES / AUTO DEPTH
 --------------------------------------------------
+__stage = "create FarmProfile dropdown"
 ProfileDropdown = Tabs.Main:AddDropdown("FarmProfile", {
     Title = "Farm Profile",
     Description = "Quick presets. Custom keeps your manual settings.",
@@ -2944,6 +2959,7 @@ for _, displayName in ipairs(initialOreValues) do
     table.insert(initialOreDropdownValues, tostring(displayName))
 end
 
+__stage = "create OreSelection dropdown"
 OreDropdown = Tabs.Main:AddDropdown("OreSelection", {
     Title = "Select Ores",
     Description = "Only ores/blocks that can spawn in the selected depth range are shown.",
@@ -3601,6 +3617,7 @@ Tabs.Stats:AddButton({
 --------------------------------------------------
 -- AUTO MINE TOGGLE
 --------------------------------------------------
+__stage = "create AutoMine toggle"
 AutoMineToggle = Tabs.Main:AddToggle("AutoMine", {
     Title = "Auto Mine",
     Description = "Rank-aware mining with sweep, priority, auto sell, upgrades, ranks and stats.",
@@ -3749,6 +3766,7 @@ end)
 --------------------------------------------------
 -- SETTINGS
 --------------------------------------------------
+__stage = "settings sections"
 SaveManager:SetLibrary(Fluent)
 InterfaceManager:SetLibrary(Fluent)
 InterfaceManager:BuildInterfaceSection(Tabs.Settings)
@@ -3770,4 +3788,20 @@ pcall(function()
 end)
 
 Window:SelectTab(1)
-warn("[SmartOreMiner] SMART V4 FIX3 ready")
+warn("[SmartOreMiner] SMART V4 FIX4 TRACE ready")
+
+end, function(err)
+    return tostring(err)
+end)
+
+if not __ok then
+    warn("[SmartOreMiner] FIX4 FAILED AT:", __stage)
+    warn("[SmartOreMiner] ERROR:", __err)
+    pcall(function()
+        if StartupDisplay then
+            StartupDisplay:SetDesc("ERROR @ " .. tostring(__stage) .. "\n" .. tostring(__err))
+        end
+    end)
+else
+    warn("[SmartOreMiner] FIX4 INIT COMPLETE")
+end
