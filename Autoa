@@ -23,11 +23,12 @@ local Window = Fluent:CreateWindow({
     Title = "Fluent " .. Fluent.Version,
     SubTitle = "Smart Ore Miner",
     TabWidth = 160,
-    Size = UDim2.fromOffset(600, 520),
+    Size = UDim2.fromOffset(620, 560),
     Acrylic = true,
     Theme = "Dark",
     MinimizeKey = Enum.KeyCode.LeftControl
 })
+
 
 local Tabs = {
 
@@ -102,17 +103,37 @@ local EternityNum =
 local AutoMine =
     false
 
--- Bedrock begins at -5000
+
+--------------------------------------------------
+-- HARD GAME LIMIT
+--------------------------------------------------
+
 local MIN_DEPTH =
     -4999
 
--- User requested depth.
+
+--------------------------------------------------
+-- USER DEPTH RANGE
+--------------------------------------------------
+
 local START_DEPTH =
     0
 
--- Actual rank limit.
+local END_DEPTH =
+    MIN_DEPTH
+
+
+--------------------------------------------------
+-- CURRENT RANK LIMIT
+--------------------------------------------------
+
 local RANK_MAX_DEPTH =
     MIN_DEPTH
+
+
+--------------------------------------------------
+-- FOLLOW
+--------------------------------------------------
 
 local FOLLOW_TARGET =
     true
@@ -120,14 +141,22 @@ local FOLLOW_TARGET =
 local TARGET_DISTANCE =
     25
 
+
+--------------------------------------------------
+-- FALLBACK POSITION
+--------------------------------------------------
+
 local DEFAULT_X =
     9
 
 local DEFAULT_Z =
     9
 
--- If one target repeatedly doesn't change,
--- temporarily ignore it.
+
+--------------------------------------------------
+-- STALL
+--------------------------------------------------
+
 local STALL_LIMIT =
     8
 
@@ -168,26 +197,32 @@ end
 
 
 --------------------------------------------------
--- RANK SYSTEM
+-- CURRENT RANK
 --------------------------------------------------
 
 local function getCurrentRankIndex()
 
-    local success, result =
+    local success,
+        result =
+
         pcall(function()
 
-            return DataClient:get({
-                "Mining",
-                "Rank"
-            })
+            return
+                DataClient:get({
+                    "Mining",
+                    "Rank"
+                })
 
         end)
+
 
     if not success then
         return nil
     end
 
-    return safeNumber(result)
+
+    return
+        safeNumber(result)
 
 end
 
@@ -201,16 +236,19 @@ local function getRankDepthInfo()
     local rankIndex =
         getCurrentRankIndex()
 
+
     if not rankIndex then
         return nil
     end
 
 
     --------------------------------------------------
-    -- RANK DATA
+    -- RANK
     --------------------------------------------------
 
-    local success, rankInfo =
+    local success,
+        rankInfo =
+
         pcall(function()
 
             return
@@ -219,6 +257,7 @@ local function getRankDepthInfo()
                 )
 
         end)
+
 
     if not success
         or not rankInfo then
@@ -233,17 +272,19 @@ local function getRankDepthInfo()
             rankInfo.layers
         )
 
+
     if not unlockedLayers then
         return nil
     end
 
 
     --------------------------------------------------
-    -- LAYER DATA
+    -- LAYERS
     --------------------------------------------------
 
     local layers =
         MiningInfo._layers
+
 
     if not layers then
         return nil
@@ -263,6 +304,7 @@ local function getRankDepthInfo()
     local maxDepth =
         MIN_DEPTH
 
+
     local nextBoundary =
         nil
 
@@ -280,15 +322,13 @@ local function getRankDepthInfo()
 
 
         --------------------------------------------------
-        -- Example:
-        --
-        -- Next Layer = 150
-        --
-        -- Last allowed Y = -149
+        -- NEXT LAYER STARTS AT 150
+        -- CURRENT MAX = -149
         --------------------------------------------------
 
         maxDepth =
             -(depth - 1)
+
 
         nextBoundary =
             -depth
@@ -297,7 +337,7 @@ local function getRankDepthInfo()
 
 
     --------------------------------------------------
-    -- NEVER GO BEYOND BEDROCK
+    -- NEVER BELOW BEDROCK
     --------------------------------------------------
 
     maxDepth =
@@ -368,16 +408,23 @@ end
 
 
 --------------------------------------------------
--- EFFECTIVE START DEPTH
+-- EFFECTIVE DEPTH RANGE
 --------------------------------------------------
 
-local function getEffectiveStartDepth()
+local function getEffectiveDepthRange()
 
-    local requested =
+    local requestedStart =
         safeNumber(
             START_DEPTH
         )
         or 0
+
+
+    local requestedEnd =
+        safeNumber(
+            END_DEPTH
+        )
+        or MIN_DEPTH
 
 
     local rankLimit =
@@ -388,19 +435,115 @@ local function getEffectiveStartDepth()
 
 
     --------------------------------------------------
-    -- Example:
+    -- NORMALIZE
     --
-    -- User: -3000
-    -- Rank: -149
+    -- -500 / -501
     --
-    -- Effective = -149
+    -- TOP    = -500
+    -- BOTTOM = -501
     --------------------------------------------------
 
-    return
+    local topDepth =
         math.max(
-            requested,
+            requestedStart,
+            requestedEnd
+        )
+
+
+    local bottomDepth =
+        math.min(
+            requestedStart,
+            requestedEnd
+        )
+
+
+    --------------------------------------------------
+    -- RANK LIMIT
+    --------------------------------------------------
+
+    topDepth =
+        math.max(
+            topDepth,
             rankLimit
         )
+
+
+    bottomDepth =
+        math.max(
+            bottomDepth,
+            rankLimit
+        )
+
+
+    --------------------------------------------------
+    -- GAME LIMIT
+    --------------------------------------------------
+
+    topDepth =
+        math.clamp(
+            topDepth,
+            MIN_DEPTH,
+            0
+        )
+
+
+    bottomDepth =
+        math.clamp(
+            bottomDepth,
+            MIN_DEPTH,
+            0
+        )
+
+
+    --------------------------------------------------
+    -- SAFETY
+    --------------------------------------------------
+
+    if bottomDepth > topDepth then
+
+        bottomDepth =
+            topDepth
+
+    end
+
+
+    return
+        topDepth,
+        bottomDepth
+
+end
+
+
+--------------------------------------------------
+-- EFFECTIVE START
+--------------------------------------------------
+
+local function getEffectiveStartDepth()
+
+    local startDepth =
+        getEffectiveDepthRange()
+
+
+    return
+        startDepth
+
+end
+
+
+--------------------------------------------------
+-- EFFECTIVE END
+--------------------------------------------------
+
+local function getEffectiveEndDepth()
+
+    local _,
+        endDepth =
+
+        getEffectiveDepthRange()
+
+
+    return
+        endDepth
 
 end
 
@@ -421,7 +564,7 @@ local function getCoordinatesFromName(name)
 
 
     --------------------------------------------------
-    -- GAME FUNCTION FIRST
+    -- GAME FUNCTION
     --------------------------------------------------
 
     local success,
@@ -442,9 +585,14 @@ local function getCoordinatesFromName(name)
 
     if success then
 
-        x = safeNumber(x)
-        y = safeNumber(y)
-        z = safeNumber(z)
+        x =
+            safeNumber(x)
+
+        y =
+            safeNumber(y)
+
+        z =
+            safeNumber(z)
 
 
         if x ~= nil
@@ -493,6 +641,7 @@ local function validDepth(y)
     y =
         safeNumber(y)
 
+
     if y == nil then
         return false
     end
@@ -508,7 +657,7 @@ local function validDepth(y)
 
 
     --------------------------------------------------
-    -- BEDROCK LIMIT
+    -- BEDROCK
     --------------------------------------------------
 
     if y < MIN_DEPTH then
@@ -517,7 +666,7 @@ local function validDepth(y)
 
 
     --------------------------------------------------
-    -- PLAYER RANK LIMIT
+    -- RANK
     --------------------------------------------------
 
     if y < RANK_MAX_DEPTH then
@@ -531,7 +680,7 @@ end
 
 
 --------------------------------------------------
--- FARM DEPTH
+-- INSIDE FARM RANGE
 --------------------------------------------------
 
 local function inFarmDepth(y)
@@ -539,18 +688,32 @@ local function inFarmDepth(y)
     y =
         safeNumber(y)
 
+
     if not validDepth(y) then
         return false
     end
 
 
-    local effective =
-        getEffectiveStartDepth()
+    local startDepth,
+        endDepth =
 
+        getEffectiveDepthRange()
+
+
+    --------------------------------------------------
+    -- EXAMPLE:
+    --
+    -- Start = -500
+    -- End   = -501
+    --
+    -- ONLY:
+    -- -500
+    -- -501
+    --------------------------------------------------
 
     return
-        y <= effective
-        and y >= RANK_MAX_DEPTH
+        y <= startDepth
+        and y >= endDepth
 
 end
 
@@ -598,6 +761,7 @@ local function getBlockInfoByName(name)
             name
         )
 
+
     if not data then
         return nil
     end
@@ -615,7 +779,9 @@ local function getBlockInfoByName(name)
     end
 
 
-    local success, info =
+    local success,
+        info =
+
         pcall(function()
 
             return
@@ -757,6 +923,7 @@ local function getComparableValue(value)
         result =
             safeNumber(result)
 
+
         if result ~= nil then
             return result
         end
@@ -776,26 +943,32 @@ end
 
 
 --------------------------------------------------
--- INDEX DATA
+-- INDEX
 --------------------------------------------------
 
 local IndexedFolder =
     nil
 
+
 local FolderConnections =
     {}
+
 
 local ModelsByName =
     {}
 
+
 local YByName =
     {}
+
 
 local NonBedrockByY =
     {}
 
+
 local StoneByY =
     {}
+
 
 local SelectedByY =
     {}
@@ -813,6 +986,7 @@ local function addToBucket(
 
     y =
         safeNumber(y)
+
 
     if y == nil then
         return
@@ -862,6 +1036,7 @@ local function removeFromBucket(
     if next(
         map[y]
     ) == nil then
+
 
         map[y] =
             nil
@@ -935,7 +1110,7 @@ local function registerBlock(block)
 
 
     --------------------------------------------------
-    -- NEW BLOCK = REMOVE OLD BLOCKED STATE
+    -- NEW MODEL CAN BE USED AGAIN
     --------------------------------------------------
 
     BlockedTargets[name] =
@@ -943,7 +1118,7 @@ local function registerBlock(block)
 
 
     --------------------------------------------------
-    -- WAIT FOR GAME DATA
+    -- DATA
     --------------------------------------------------
 
     local data =
@@ -956,6 +1131,7 @@ local function registerBlock(block)
 
 
         for i = 1, 10 do
+
 
             task.wait()
 
@@ -993,13 +1169,18 @@ local function registerBlock(block)
         )
 
 
-    x = safeNumber(x)
-    y = safeNumber(y)
-    z = safeNumber(z)
+    x =
+        safeNumber(x)
+
+    y =
+        safeNumber(y)
+
+    z =
+        safeNumber(z)
 
 
     --------------------------------------------------
-    -- RANK CHECK
+    -- ONLY CURRENT RANK
     --------------------------------------------------
 
     if not validDepth(y) then
@@ -1023,7 +1204,7 @@ local function registerBlock(block)
 
 
     --------------------------------------------------
-    -- REMOVE OLD CLASSIFICATION
+    -- REMOVE OLD
     --------------------------------------------------
 
     if ModelsByName[name] then
@@ -1036,7 +1217,7 @@ local function registerBlock(block)
 
 
     --------------------------------------------------
-    -- SAVE MODEL
+    -- SAVE
     --------------------------------------------------
 
     ModelsByName[name] =
@@ -1053,6 +1234,7 @@ local function registerBlock(block)
 
     if not isBedrock(info) then
 
+
         addToBucket(
             NonBedrockByY,
             y,
@@ -1067,6 +1249,7 @@ local function registerBlock(block)
     --------------------------------------------------
 
     if isStone(info) then
+
 
         addToBucket(
             StoneByY,
@@ -1083,6 +1266,7 @@ local function registerBlock(block)
 
     if isSelectedOre(info) then
 
+
         addToBucket(
             SelectedByY,
             y,
@@ -1095,7 +1279,7 @@ end
 
 
 --------------------------------------------------
--- UNREGISTER BLOCK
+-- UNREGISTER
 --------------------------------------------------
 
 local function unregisterBlock(block)
@@ -1112,7 +1296,7 @@ local function unregisterBlock(block)
 
 
     --------------------------------------------------
-    -- REPLACEBLOCK PROTECTION
+    -- REPLACEMENT PROTECTION
     --------------------------------------------------
 
     if ModelsByName[name]
@@ -1139,14 +1323,18 @@ local function clearIndex()
     ModelsByName =
         {}
 
+
     YByName =
         {}
+
 
     NonBedrockByY =
         {}
 
+
     StoneByY =
         {}
+
 
     SelectedByY =
         {}
@@ -1160,9 +1348,11 @@ end
 
 local function disconnectFolder()
 
-    for _, connection in ipairs(
-        FolderConnections
-    ) do
+    for _,
+        connection in ipairs(
+            FolderConnections
+        ) do
+
 
         pcall(function()
 
@@ -1194,9 +1384,10 @@ local function rescanMine()
     end
 
 
-    for _, block in ipairs(
-        folder:GetChildren()
-    ) do
+    for _,
+        block in ipairs(
+            folder:GetChildren()
+        ) do
 
 
         if block
@@ -1244,18 +1435,13 @@ local function setupIndex()
     end
 
 
-    --------------------------------------------------
-    -- SAME FOLDER
-    --------------------------------------------------
+    if IndexedFolder
+        == folder then
 
-    if IndexedFolder == folder then
         return true
+
     end
 
-
-    --------------------------------------------------
-    -- NEW FOLDER
-    --------------------------------------------------
 
     disconnectFolder()
 
@@ -1282,6 +1468,7 @@ local function setupIndex()
 
 
                 task.defer(function()
+
 
                     registerBlock(
                         block
@@ -1336,7 +1523,7 @@ end
 
 
 --------------------------------------------------
--- REBUILD SELECTED INDEX
+-- REBUILD SELECTED
 --------------------------------------------------
 
 local function rebuildSelectedIndex()
@@ -1345,9 +1532,10 @@ local function rebuildSelectedIndex()
         {}
 
 
-    for name, model in pairs(
-        ModelsByName
-    ) do
+    for name,
+        model in pairs(
+            ModelsByName
+        ) do
 
 
         if model
@@ -1435,16 +1623,21 @@ end
 
 
 --------------------------------------------------
--- DEEPEST ACCESSIBLE Y
+-- DEEPEST Y
 --------------------------------------------------
 
 local function deepestY(
     map,
-    maxY
+    maxY,
+    minY
 )
 
     maxY =
         safeNumber(maxY)
+
+
+    minY =
+        safeNumber(minY)
 
 
     local result =
@@ -1474,7 +1667,17 @@ local function deepestY(
             if maxY ~= nil then
 
                 allowed =
-                    y <= maxY
+                    allowed
+                    and y <= maxY
+
+            end
+
+
+            if minY ~= nil then
+
+                allowed =
+                    allowed
+                    and y >= minY
 
             end
 
@@ -1507,7 +1710,7 @@ end
 
 
 --------------------------------------------------
--- PLAYER GRID POSITION
+-- PLAYER GRID
 --------------------------------------------------
 
 local function getPlayerGridPosition()
@@ -1541,21 +1744,27 @@ local function getPlayerGridPosition()
     end
 
 
-    return
-
+    local x =
         math.round(
             (
                 root.Position.X
                 - origin.X
             ) / 6
-        ),
+        )
 
+
+    local z =
         math.round(
             (
                 root.Position.Z
                 - origin.Z
             ) / 6
         )
+
+
+    return
+        x,
+        z
 
 end
 
@@ -1587,6 +1796,7 @@ local function pickNearest(
 
     local bestName =
         nil
+
 
     local bestDistance =
         math.huge
@@ -1624,8 +1834,11 @@ local function pickNearest(
                     )
 
 
-                x = safeNumber(x)
-                z = safeNumber(z)
+                x =
+                    safeNumber(x)
+
+                z =
+                    safeNumber(z)
 
 
                 if x ~= nil
@@ -1634,6 +1847,7 @@ local function pickNearest(
 
                     local dx =
                         x - targetX
+
 
                     local dz =
                         z - targetZ
@@ -1651,6 +1865,7 @@ local function pickNearest(
                         bestDistance =
                             distance
 
+
                         bestName =
                             name
 
@@ -1665,7 +1880,8 @@ local function pickNearest(
     end
 
 
-    return bestName
+    return
+        bestName
 
 end
 
@@ -1685,7 +1901,8 @@ local function getModelPosition(model)
         "BasePart"
     ) then
 
-        return model.Position
+        return
+            model.Position
 
     end
 
@@ -1703,6 +1920,7 @@ local function getModelPosition(model)
 
     if success
         and pivot then
+
 
         return
             pivot.Position
@@ -1730,7 +1948,6 @@ local function moveNearTarget(model)
         or not model.Parent then
 
         return false
-
     end
 
 
@@ -1776,13 +1993,16 @@ local function moveNearTarget(model)
     -- ALREADY CLOSE
     --------------------------------------------------
 
-    if distance <= TARGET_DISTANCE then
+    if distance
+        <= TARGET_DISTANCE then
+
         return true
+
     end
 
 
     --------------------------------------------------
-    -- MOVE ABOVE TARGET
+    -- MOVE ABOVE
     --------------------------------------------------
 
     local destination =
@@ -1825,7 +2045,8 @@ local function moveNearTarget(model)
     task.wait()
 
 
-    return success
+    return
+        success
 
 end
 
@@ -1888,10 +2109,11 @@ local function waitForCooldown(run)
 
 
         --------------------------------------------------
-        -- REQUEST ACTIVE
+        -- REQUEST RUNNING
         --------------------------------------------------
 
         if last == math.huge then
+
 
             task.wait()
 
@@ -1905,6 +2127,7 @@ local function waitForCooldown(run)
 
 
         if last == nil then
+
 
             task.wait()
 
@@ -2045,16 +2268,22 @@ local function modeAllows(
 
     if mode == "selected" then
 
+
         return
-            isSelectedOre(info)
+            isSelectedOre(
+                info
+            )
 
     end
 
 
     if mode == "stone" then
 
+
         return
-            isStone(info)
+            isStone(
+                info
+            )
 
     end
 
@@ -2128,6 +2357,7 @@ local function mineTarget(
 
             if folder then
 
+
                 model =
                     folder:
                     FindFirstChild(
@@ -2161,6 +2391,7 @@ local function mineTarget(
 
             BlockedTargets[name] =
                 nil
+
 
             return true
 
@@ -2255,7 +2486,7 @@ local function mineTarget(
 
 
         --------------------------------------------------
-        -- SET CURRENT BLOCK
+        -- CURRENT BLOCK
         --------------------------------------------------
 
         MiningServiceClient.currentBlock =
@@ -2263,7 +2494,7 @@ local function mineTarget(
 
 
         --------------------------------------------------
-        -- ORIGINAL GAME DAMAGE FUNCTION
+        -- DAMAGE
         --------------------------------------------------
 
         local success =
@@ -2277,7 +2508,7 @@ local function mineTarget(
 
 
         --------------------------------------------------
-        -- ALLOW SERVER UPDATE
+        -- SERVER UPDATE
         --------------------------------------------------
 
         task.wait()
@@ -2319,7 +2550,7 @@ local function mineTarget(
 
 
         --------------------------------------------------
-        -- STALL DETECTION
+        -- STALL
         --------------------------------------------------
 
         if not success
@@ -2340,10 +2571,11 @@ local function mineTarget(
 
 
         --------------------------------------------------
-        -- IGNORE FAILED TARGET
+        -- SKIP BROKEN TARGET
         --------------------------------------------------
 
-        if stalled >= STALL_LIMIT then
+        if stalled
+            >= STALL_LIMIT then
 
 
             BlockedTargets[name] =
@@ -2377,10 +2609,22 @@ local function getFrontierTarget(
     anchorZ
 )
 
+    local _,
+        effectiveEnd =
+
+        getEffectiveDepthRange()
+
+
+    --------------------------------------------------
+    -- WE NEED FRONTIER FROM CURRENT MINE,
+    -- BUT NEVER BELOW END DEPTH.
+    --------------------------------------------------
+
     local y =
         deepestY(
             NonBedrockByY,
-            nil
+            nil,
+            effectiveEnd
         )
 
 
@@ -2397,13 +2641,13 @@ local function getFrontierTarget(
     end
 
 
-    --------------------------------------------------
-    -- STONE FIRST
-    --------------------------------------------------
-
     local name =
         nil
 
+
+    --------------------------------------------------
+    -- STONE FIRST FOR PATH
+    --------------------------------------------------
 
     local stoneBucket =
         StoneByY[y]
@@ -2426,7 +2670,7 @@ local function getFrontierTarget(
 
 
     --------------------------------------------------
-    -- OTHERWISE ANY BLOCK
+    -- ANY NON BEDROCK
     --------------------------------------------------
 
     if not name then
@@ -2450,7 +2694,7 @@ end
 
 
 --------------------------------------------------
--- MOST VALUABLE SELECTED ORE
+-- HIGHEST VALUE SELECTED ORE
 --------------------------------------------------
 
 local function getSelectedTarget(
@@ -2459,27 +2703,33 @@ local function getSelectedTarget(
 )
 
     anchorX =
-        safeNumber(anchorX)
+        safeNumber(
+            anchorX
+        )
         or DEFAULT_X
 
 
     anchorZ =
-        safeNumber(anchorZ)
+        safeNumber(
+            anchorZ
+        )
         or DEFAULT_Z
 
 
     local bestName =
         nil
 
+
     local bestValue =
         -math.huge
+
 
     local bestDistance =
         math.huge
 
 
     --------------------------------------------------
-    -- SEARCH ALL SELECTED ORES
+    -- CHECK ALL SELECTED ORES
     --------------------------------------------------
 
     for rawY,
@@ -2489,8 +2739,14 @@ local function getSelectedTarget(
 
 
         local y =
-            safeNumber(rawY)
+            safeNumber(
+                rawY
+            )
 
+
+        --------------------------------------------------
+        -- ONLY BETWEEN START + END
+        --------------------------------------------------
 
         if y ~= nil
             and inFarmDepth(y) then
@@ -2550,6 +2806,7 @@ local function getSelectedTarget(
                             x =
                                 safeNumber(x)
 
+
                             z =
                                 safeNumber(z)
 
@@ -2565,6 +2822,7 @@ local function getSelectedTarget(
                                 local dx =
                                     x - anchorX
 
+
                                 local dz =
                                     z - anchorZ
 
@@ -2577,34 +2835,38 @@ local function getSelectedTarget(
 
 
                             --------------------------------------------------
-                            -- HIGHER VALUE WINS
+                            -- HIGHEST VALUE FIRST
                             --------------------------------------------------
 
-                            if value > bestValue then
+                            if value
+                                > bestValue then
 
 
                                 bestValue =
                                     value
 
+
                                 bestDistance =
                                     distance
+
 
                                 bestName =
                                     name
 
 
                             --------------------------------------------------
-                            -- SAME VALUE:
-                            -- NEAREST WINS
+                            -- SAME VALUE = NEAREST
                             --------------------------------------------------
 
-                            elseif value == bestValue
+                            elseif value
+                                    == bestValue
                                 and distance
                                     < bestDistance then
 
 
                                 bestDistance =
                                     distance
+
 
                                 bestName =
                                     name
@@ -2624,7 +2886,8 @@ local function getSelectedTarget(
     end
 
 
-    return bestName
+    return
+        bestName
 
 end
 
@@ -2638,10 +2901,6 @@ local function waitForMine(run)
     while isRunning(run) do
 
 
-        --------------------------------------------------
-        -- WAIT FOR GAME SERVICE INITIALIZATION
-        --------------------------------------------------
-
         if MiningServiceClient.mineFolder
             and MiningServiceClient.blocks then
 
@@ -2650,6 +2909,7 @@ local function waitForMine(run)
 
 
                 rescanMine()
+
 
                 return true
 
@@ -2671,7 +2931,7 @@ end
 
 
 --------------------------------------------------
--- REACH EFFECTIVE START DEPTH
+-- REACH START DEPTH
 --------------------------------------------------
 
 local function reachStartDepth(run)
@@ -2682,15 +2942,19 @@ local function reachStartDepth(run)
         getPlayerGridPosition()
 
 
-    local effectiveStart =
-        getEffectiveStartDepth()
+    local effectiveStart,
+        effectiveEnd =
+
+        getEffectiveDepthRange()
 
 
     --------------------------------------------------
-    -- INFORM IF RANK LIMIT CHANGED REQUEST
+    -- RANK LIMIT INFORMATION
     --------------------------------------------------
 
     if START_DEPTH
+        < RANK_MAX_DEPTH
+        or END_DEPTH
         < RANK_MAX_DEPTH then
 
 
@@ -2700,13 +2964,13 @@ local function reachStartDepth(run)
                 "Rank Depth Limit",
 
             Content =
-                "Requested "
+                "Effective range: "
                 .. tostring(
-                    START_DEPTH
+                    effectiveStart
                 )
-                .. " | Rank allows "
+                .. " to "
                 .. tostring(
-                    RANK_MAX_DEPTH
+                    effectiveEnd
                 ),
 
             Duration =
@@ -2723,7 +2987,7 @@ local function reachStartDepth(run)
             "Depth Loader",
 
         Content =
-            "Effective Start Depth: "
+            "Going to "
             .. tostring(
                 effectiveStart
             ),
@@ -2745,13 +3009,15 @@ local function reachStartDepth(run)
 
 
         --------------------------------------------------
-        -- CURRENT DEEPEST
+        -- DEEPEST LOADED BLOCK THAT IS STILL
+        -- INSIDE OUR ALLOWED END RANGE
         --------------------------------------------------
 
         local currentDeepest =
             deepestY(
                 NonBedrockByY,
-                nil
+                nil,
+                effectiveEnd
             )
 
 
@@ -2763,9 +3029,11 @@ local function reachStartDepth(run)
 
         if currentDeepest == nil then
 
+
             task.wait(
                 0.05
             )
+
 
             continue
 
@@ -2783,16 +3051,19 @@ local function reachStartDepth(run)
             Fluent:Notify({
 
                 Title =
-                    "Farm Depth reached",
+                    "Farm Range reached",
 
                 Content =
-                    "Current Y: "
+                    tostring(
+                        effectiveStart
+                    )
+                    .. " to "
                     .. tostring(
-                        currentDeepest
+                        effectiveEnd
                     ),
 
                 Duration =
-                    2
+                    3
 
             })
 
@@ -2824,11 +3095,14 @@ local function reachStartDepth(run)
             )
 
 
-        if not target then
+        if not target
+            or targetY == nil then
+
 
             task.wait(
                 0.05
             )
+
 
             continue
 
@@ -2836,13 +3110,11 @@ local function reachStartDepth(run)
 
 
         --------------------------------------------------
-        -- SAFETY RANK CHECK
+        -- DON'T GO BELOW END
         --------------------------------------------------
 
-        if targetY == nil
-            or not validDepth(
-                targetY
-            ) then
+        if targetY
+            < effectiveEnd then
 
 
             BlockedTargets[target] =
@@ -2851,13 +3123,35 @@ local function reachStartDepth(run)
 
             task.wait()
 
+
             continue
 
         end
 
 
         --------------------------------------------------
-        -- UPDATE ANCHOR
+        -- RANK
+        --------------------------------------------------
+
+        if not validDepth(
+            targetY
+        ) then
+
+
+            BlockedTargets[target] =
+                true
+
+
+            task.wait()
+
+
+            continue
+
+        end
+
+
+        --------------------------------------------------
+        -- ANCHOR
         --------------------------------------------------
 
         local x,
@@ -2869,22 +3163,32 @@ local function reachStartDepth(run)
             )
 
 
-        x = safeNumber(x)
-        z = safeNumber(z)
+        x =
+            safeNumber(x)
+
+
+        z =
+            safeNumber(z)
 
 
         if x ~= nil then
-            anchorX = x
+
+            anchorX =
+                x
+
         end
 
 
         if z ~= nil then
-            anchorZ = z
+
+            anchorZ =
+                z
+
         end
 
 
         --------------------------------------------------
-        -- MINE
+        -- MINE PATH
         --------------------------------------------------
 
         mineTarget(
@@ -2895,6 +3199,7 @@ local function reachStartDepth(run)
 
 
         task.wait()
+
 
         rescanMine()
 
@@ -2923,12 +3228,10 @@ local function farmingLoop(
     while isRunning(run) do
 
 
-        --------------------------------------------------
-        -- RANK LIMIT MAY CHANGE
-        --------------------------------------------------
+        local effectiveStart,
+            effectiveEnd =
 
-        local effectiveStart =
-            getEffectiveStartDepth()
+            getEffectiveDepthRange()
 
 
         --------------------------------------------------
@@ -2955,17 +3258,27 @@ local function farmingLoop(
                 )
 
 
-            x = safeNumber(x)
-            z = safeNumber(z)
+            x =
+                safeNumber(x)
+
+
+            z =
+                safeNumber(z)
 
 
             if x ~= nil then
-                anchorX = x
+
+                anchorX =
+                    x
+
             end
 
 
             if z ~= nil then
-                anchorZ = z
+
+                anchorZ =
+                    z
+
             end
 
 
@@ -2981,7 +3294,7 @@ local function farmingLoop(
 
             --------------------------------------------------
             -- PRIORITY 2:
-            -- OPEN DEEPEST ACCESSIBLE FRONTIER
+            -- OPEN PATH UNTIL END DEPTH
             --------------------------------------------------
 
             local frontier,
@@ -2999,11 +3312,24 @@ local function farmingLoop(
                 )
 
 
+            --------------------------------------------------
+            -- IMPORTANT:
+            --
+            -- Start -500
+            -- End   -501
+            --
+            -- At -500 we may mine path to reveal -501.
+            --
+            -- At -501 we DO NOT continue toward -502.
+            --------------------------------------------------
+
             if frontier
                 and frontierY ~= nil
                 and validDepth(
                     frontierY
-                ) then
+                )
+                and frontierY
+                    > effectiveEnd then
 
 
                 local x,
@@ -3018,17 +3344,24 @@ local function farmingLoop(
                 x =
                     safeNumber(x)
 
+
                 z =
                     safeNumber(z)
 
 
                 if x ~= nil then
-                    anchorX = x
+
+                    anchorX =
+                        x
+
                 end
 
 
                 if z ~= nil then
-                    anchorZ = z
+
+                    anchorZ =
+                        z
+
                 end
 
 
@@ -3042,6 +3375,12 @@ local function farmingLoop(
             else
 
 
+                --------------------------------------------------
+                -- END DEPTH REACHED
+                --
+                -- Wait for selected ores in the range.
+                --------------------------------------------------
+
                 task.wait(
                     0.1
                 )
@@ -3052,17 +3391,19 @@ local function farmingLoop(
 
 
         --------------------------------------------------
-        -- PERIODIC REFRESH
+        -- REFRESH
         --------------------------------------------------
 
         counter =
             counter + 1
 
 
-        if counter % 25 == 0 then
+        if counter % 25
+            == 0 then
 
 
             rescanMine()
+
 
             rebuildSelectedIndex()
 
@@ -3083,14 +3424,14 @@ local function startMining(run)
 
 
         --------------------------------------------------
-        -- REFRESH CURRENT RANK FIRST
+        -- RANK
         --------------------------------------------------
 
         refreshRankDepth()
 
 
         --------------------------------------------------
-        -- CLEAR TEMP BLOCK FAILURES
+        -- RESET FAILURES
         --------------------------------------------------
 
         BlockedTargets =
@@ -3111,10 +3452,11 @@ local function startMining(run)
 
 
         --------------------------------------------------
-        -- INDEX MUST RESPECT CURRENT RANK
+        -- CURRENT RANK INDEX
         --------------------------------------------------
 
         rebuildWholeIndex()
+
 
         rebuildSelectedIndex()
 
@@ -3137,6 +3479,7 @@ local function startMining(run)
                 run
             ) then
 
+
             return
 
         end
@@ -3147,6 +3490,7 @@ local function startMining(run)
         --------------------------------------------------
 
         rescanMine()
+
 
         rebuildSelectedIndex()
 
@@ -3167,7 +3511,7 @@ end
 
 
 --------------------------------------------------
--- INITIAL RANK LOAD
+-- INITIAL RANK
 --------------------------------------------------
 
 refreshRankDepth()
@@ -3181,11 +3525,32 @@ local OreValues =
     {}
 
 
+--------------------------------------------------
+-- DISPLAY NAME -> ID
+--------------------------------------------------
+
+local OreDisplayToId =
+    {}
+
+
+--------------------------------------------------
+-- IMPORTANT:
+-- DEFAULT = ALL ORES SELECTED
+--------------------------------------------------
+
+SelectedOres =
+    {}
+
+
 for id,
     data in pairs(
         BlocksData
     ) do
 
+
+    --------------------------------------------------
+    -- DON'T INCLUDE STONE / BEDROCK
+    --------------------------------------------------
 
     if id
         and not string.match(
@@ -3211,10 +3576,34 @@ for id,
         end
 
 
+        --------------------------------------------------
+        -- ADD TO DROPDOWN
+        --------------------------------------------------
+
         table.insert(
             OreValues,
             displayName
         )
+
+
+        --------------------------------------------------
+        -- MAP DISPLAY -> ID
+        --------------------------------------------------
+
+        OreDisplayToId[
+            displayName
+        ] =
+            id
+
+
+        --------------------------------------------------
+        -- DEFAULT SELECTED
+        --------------------------------------------------
+
+        SelectedOres[
+            id
+        ] =
+            true
 
     end
 
@@ -3227,7 +3616,7 @@ table.sort(
 
 
 --------------------------------------------------
--- SELECT ORES
+-- ORE DROPDOWN
 --------------------------------------------------
 
 local MultiDropdown =
@@ -3239,7 +3628,7 @@ local MultiDropdown =
                 "Select Ores",
 
             Description =
-                "Highest value selected ore is mined first.",
+                "All ores selected by default. Highest Value mined first.",
 
             Values =
                 OreValues,
@@ -3247,8 +3636,12 @@ local MultiDropdown =
             Multi =
                 true,
 
+            --------------------------------------------------
+            -- ALL SELECTED BY DEFAULT
+            --------------------------------------------------
+
             Default =
-                {}
+                OreValues
 
         }
     )
@@ -3266,7 +3659,7 @@ MultiDropdown:OnChanged(
             {}
 
 
-        for name,
+        for displayName,
             enabled in pairs(
                 values
             ) do
@@ -3275,39 +3668,19 @@ MultiDropdown:OnChanged(
             if enabled then
 
 
-                for id,
-                    data in pairs(
-                        BlocksData
-                    ) do
+                local id =
+                    OreDisplayToId[
+                        displayName
+                    ]
 
 
-                    local displayName =
+                if id then
+
+
+                    SelectedOres[
                         id
-
-
-                    if type(data)
-                        == "table" then
-
-
-                        displayName =
-                            data.name
-                            or data.Name
-                            or id
-
-                    end
-
-
-                    if displayName
-                        == name then
-
-
-                        SelectedOres[id] =
-                            true
-
-
-                        break
-
-                    end
+                    ] =
+                        true
 
                 end
 
@@ -3323,7 +3696,7 @@ MultiDropdown:OnChanged(
 
 
 --------------------------------------------------
--- RANK DISPLAY REFERENCE
+-- UI REFERENCES
 --------------------------------------------------
 
 local RankDisplay
@@ -3343,13 +3716,13 @@ Tabs.Main:AddInput(
             "Start Depth",
 
         Description =
-            "Requested farming depth. Rank limit is applied automatically.",
+            "Top of farm range. Example: -500",
 
         Default =
             "0",
 
         Placeholder =
-            "-3000",
+            "-500",
 
         Numeric =
             false,
@@ -3376,7 +3749,7 @@ Tabs.Main:AddInput(
                             "Start Depth",
 
                         Content =
-                            "Enter e.g. -3000",
+                            "Enter e.g. -500",
 
                         Duration =
                             2
@@ -3389,10 +3762,6 @@ Tabs.Main:AddInput(
                 end
 
 
-                --------------------------------------------------
-                -- USER REQUEST
-                --------------------------------------------------
-
                 START_DEPTH =
                     math.clamp(
                         math.round(
@@ -3402,10 +3771,6 @@ Tabs.Main:AddInput(
                         0
                     )
 
-
-                --------------------------------------------------
-                -- UPDATE RANK DISPLAY
-                --------------------------------------------------
 
                 refreshRankDepth()
 
@@ -3418,7 +3783,114 @@ Tabs.Main:AddInput(
 
 
                 --------------------------------------------------
-                -- RESTART ACTIVE MINER
+                -- RESTART
+                --------------------------------------------------
+
+                if AutoMine then
+
+
+                    RunId =
+                        RunId + 1
+
+
+                    local run =
+                        RunId
+
+
+                    startMining(
+                        run
+                    )
+
+                end
+
+            end
+
+    }
+)
+
+
+--------------------------------------------------
+-- END DEPTH
+--------------------------------------------------
+
+Tabs.Main:AddInput(
+    "EndDepth",
+    {
+
+        Title =
+            "End Depth",
+
+        Description =
+            "Bottom of farm range. Example: -501",
+
+        Default =
+            tostring(
+                MIN_DEPTH
+            ),
+
+        Placeholder =
+            "-501",
+
+        Numeric =
+            false,
+
+        Finished =
+            true,
+
+        Callback =
+            function(value)
+
+
+                local number =
+                    safeNumber(
+                        value
+                    )
+
+
+                if number == nil then
+
+
+                    Fluent:Notify({
+
+                        Title =
+                            "End Depth",
+
+                        Content =
+                            "Enter e.g. -501",
+
+                        Duration =
+                            2
+
+                    })
+
+
+                    return
+
+                end
+
+
+                END_DEPTH =
+                    math.clamp(
+                        math.round(
+                            number
+                        ),
+                        MIN_DEPTH,
+                        0
+                    )
+
+
+                refreshRankDepth()
+
+
+                if updateRankDisplay then
+
+                    updateRankDisplay()
+
+                end
+
+
+                --------------------------------------------------
+                -- RESTART
                 --------------------------------------------------
 
                 if AutoMine then
@@ -3452,10 +3924,10 @@ RankDisplay =
     Tabs.Main:AddParagraph({
 
         Title =
-            "Mining Rank",
+            "Mining Range",
 
         Content =
-            "Loading rank..."
+            "Loading..."
 
     })
 
@@ -3477,6 +3949,7 @@ updateRankDisplay =
 
             pcall(function()
 
+
                 RankDisplay:SetDesc(
                     "Could not read Mining Rank."
                 )
@@ -3489,8 +3962,10 @@ updateRankDisplay =
         end
 
 
-        local effective =
-            getEffectiveStartDepth()
+        local effectiveStart,
+            effectiveEnd =
+
+            getEffectiveDepthRange()
 
 
         local text =
@@ -3507,7 +3982,7 @@ updateRankDisplay =
             .. tostring(
                 info.Layers
             )
-            .. "\nMax Mine Depth: "
+            .. "\nMax Rank Depth: "
             .. tostring(
                 info.MaxDepth
             )
@@ -3518,7 +3993,7 @@ updateRankDisplay =
 
             text =
                 text
-                .. "\nNext Locked/Bedrock: "
+                .. "\nNext Locked Layer: "
                 .. tostring(
                     info.NextBoundary
                 )
@@ -3528,17 +4003,28 @@ updateRankDisplay =
 
         text =
             text
-            .. "\nSelected Start Depth: "
+            .. "\n"
+            .. "\nSelected Start: "
             .. tostring(
                 START_DEPTH
             )
-            .. "\nEffective Start Depth: "
+            .. "\nSelected End: "
             .. tostring(
-                effective
+                END_DEPTH
+            )
+            .. "\n"
+            .. "\nEffective Start: "
+            .. tostring(
+                effectiveStart
+            )
+            .. "\nEffective End: "
+            .. tostring(
+                effectiveEnd
             )
 
 
         pcall(function()
+
 
             RankDisplay:SetDesc(
                 text
@@ -3566,7 +4052,7 @@ Tabs.Main:AddButton({
         "Refresh Rank",
 
     Description =
-        "Re-read current rank and depth limit.",
+        "Re-read rank and depth limit.",
 
     Callback =
         function()
@@ -3574,9 +4060,16 @@ Tabs.Main:AddButton({
 
             refreshRankDepth()
 
+
+            BlockedTargets =
+                {}
+
+
             rebuildWholeIndex()
 
+
             rebuildSelectedIndex()
+
 
             updateRankDisplay()
 
@@ -3648,7 +4141,7 @@ local Toggle =
                 "Auto Mine",
 
             Description =
-                "Rank-aware + highest-value ore priority.",
+                "Rank aware + Start/End Depth + Value Priority.",
 
             Default =
                 false
@@ -3666,7 +4159,7 @@ Toggle:OnChanged(
 
 
         --------------------------------------------------
-        -- INVALIDATE OLD RUN
+        -- KILL OLD RUN
         --------------------------------------------------
 
         RunId =
@@ -3686,6 +4179,7 @@ Toggle:OnChanged(
 
             refreshRankDepth()
 
+
             updateRankDisplay()
 
 
@@ -3693,8 +4187,10 @@ Toggle:OnChanged(
                 RunId
 
 
-            local effective =
-                getEffectiveStartDepth()
+            local effectiveStart,
+                effectiveEnd =
+
+                getEffectiveDepthRange()
 
 
             Fluent:Notify({
@@ -3703,13 +4199,13 @@ Toggle:OnChanged(
                     "Auto Mine",
 
                 Content =
-                    "Effective Depth: "
+                    "Range: "
                     .. tostring(
-                        effective
+                        effectiveStart
                     )
-                    .. " | Rank Limit: "
+                    .. " to "
                     .. tostring(
-                        RANK_MAX_DEPTH
+                        effectiveEnd
                     ),
 
                 Duration =
@@ -3773,8 +4269,7 @@ pcall(function()
 
 
                 --------------------------------------------------
-                -- CLEAR OLD INDEX BECAUSE NEW RANK MAY
-                -- UNLOCK DEEPER BLOCKS
+                -- NEW RANK CAN UNLOCK NEW DEPTHS
                 --------------------------------------------------
 
                 BlockedTargets =
@@ -3783,7 +4278,9 @@ pcall(function()
 
                 rebuildWholeIndex()
 
+
                 rebuildSelectedIndex()
+
 
                 updateRankDisplay()
 
@@ -3794,7 +4291,7 @@ pcall(function()
                         "Mining Rank Updated",
 
                     Content =
-                        "Depth Limit: "
+                        "Depth: "
                         .. tostring(
                             oldLimit
                         )
@@ -3810,7 +4307,7 @@ pcall(function()
 
 
                 --------------------------------------------------
-                -- RESTART ACTIVE MINER
+                -- RESTART
                 --------------------------------------------------
 
                 if AutoMine then
@@ -3843,6 +4340,7 @@ end)
 SaveManager:SetLibrary(
     Fluent
 )
+
 
 InterfaceManager:SetLibrary(
     Fluent
