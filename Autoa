@@ -1,3 +1,5 @@
+warn("[SmartOreMiner] FINAL FIX V2 loaded")
+
 -- Smart Ore Miner
 -- Features:
 --  * Rank-aware depth limit
