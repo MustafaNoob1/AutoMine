@@ -1,4 +1,4 @@
-warn("[SmartOreMiner] SMART V4 FIX7 ALL ORES loaded")
+warn("[SmartOreMiner] SMART V4 FIX8 AUTO INTERSTELLAR loaded")
 
 -- Smart Ore Miner V4
 -- FIX6 COMPAT: reduces top-level local variables to avoid executor/Luau local-register compile limits.
@@ -26,6 +26,7 @@ warn("[SmartOreMiner] SMART V4 FIX7 ALL ORES loaded")
 --  * Auto Bucks Upgrade (MiningUpgrades -> Bucks)
 --  * Auto Rank Up
 --  * Smart progression spending priority
+--  * Auto Interstellar reset + automatic mining resume
 
 --------------------------------------------------
 -- LIBRARIES
@@ -132,12 +133,15 @@ AUTO_SELL_ORES = false
 AUTO_SELL_INTERVAL = 15
 AUTO_BUCKS_UPGRADE = false
 AUTO_RANK_UP = false
+AUTO_INTERSTELLAR = false
 PROGRESSION_PRIORITY = "Smart"
 PROGRESSION_TICK_SECONDS = 1
 PROGRESSION_BUY_DELAY = 0.20
 PROGRESSION_MAX_UPGRADES_PER_TICK = 3
 
 ProgressionBusy = false
+InterstellarBusy = false
+InterstellarResumePending = false
 LastAutoSellAt = -math.huge
 LastProgressionAction = "-"
 LastProgressionError = "-"
@@ -199,7 +203,8 @@ local Stats = {
     LastResetReason = "-",
     AutoSells = 0,
     BucksUpgradesBought = 0,
-    RanksBought = 0
+    RanksBought = 0,
+    Interstellars = 0
 }
 
 local CycleMinedByDepth = {}
@@ -231,6 +236,7 @@ updateProgressionDisplay = nil
 AutoSellToggle = nil
 AutoBucksUpgradeToggle = nil
 AutoRankToggle = nil
+AutoInterstellarToggle = nil
 ProgressionPriorityDropdown = nil
 
 --------------------------------------------------
@@ -669,6 +675,142 @@ local function buyNextRankNow(ignoreToggle)
     return false, "Rank did not change"
 end
 
+function getInterstellarInfo()
+    local cost = 1e21
+
+    pcall(function()
+        if MiningInfo
+            and MiningInfo._interstellar
+            and MiningInfo._interstellar.cost ~= nil then
+            cost = getComparableValue(MiningInfo._interstellar.cost)
+        end
+    end)
+
+    if cost <= 0 then
+        cost = 1e21
+    end
+
+    local points = 0
+    local gain = 0
+
+    pcall(function()
+        points = getComparableValue(DataClient:get({"Items", "InterstellarPoint"}))
+    end)
+
+    pcall(function()
+        gain = getComparableValue(DataClient:get({"Boosts", "Interstellar_Gain"}))
+    end)
+
+    return {
+        Bucks = getBucksBalance(),
+        Cost = cost,
+        Points = points,
+        Gain = gain,
+        CanReset = getBucksBalance() >= cost
+    }
+end
+
+function performInterstellarNow(ignoreToggle)
+    if InterstellarBusy then
+        return false, "Interstellar already running"
+    end
+
+    if not ignoreToggle and not AUTO_INTERSTELLAR then
+        return false, "Auto Interstellar disabled"
+    end
+
+    local before = getInterstellarInfo()
+
+    if not before.CanReset then
+        return false, "Need " .. formatNumber(before.Cost) .. " Bucks"
+    end
+
+    InterstellarBusy = true
+
+    -- Sell first so a prestige/reset never leaves sellable ore inventory behind.
+    pcall(function()
+        sellAllOresNow(true)
+    end)
+
+    task.wait(PROGRESSION_BUY_DELAY)
+
+    before = getInterstellarInfo()
+
+    if not before.CanReset then
+        InterstellarBusy = false
+        return false, "Not enough Bucks after sell/update"
+    end
+
+    local wasMining = AutoMine == true
+
+    -- Stop the active mining run before the server resets progression.
+    if wasMining then
+        RunId = RunId + 1
+    end
+
+    IsResetting = true
+    MiningServiceClient.currentBlock = nil
+
+    local ok, result = invokeGameNetwork("Interstellar")
+
+    if not ok then
+        IsResetting = false
+        InterstellarBusy = false
+        LastProgressionError = tostring(result)
+
+        if wasMining then
+            InterstellarResumePending = true
+        end
+
+        return false, result
+    end
+
+    local changed = false
+    local after = before
+    local timeoutAt = os.clock() + 8
+
+    while os.clock() < timeoutAt do
+        task.wait(0.15)
+        after = getInterstellarInfo()
+
+        if after.Points > before.Points
+            or after.Bucks < before.Bucks then
+            changed = true
+            break
+        end
+    end
+
+    IsResetting = false
+    InterstellarBusy = false
+
+    if not changed then
+        LastProgressionError = "Interstellar state did not change"
+
+        if wasMining then
+            InterstellarResumePending = true
+        end
+
+        return false, LastProgressionError
+    end
+
+    Stats.Interstellars = (Stats.Interstellars or 0) + 1
+    LastProgressionAction =
+        "Interstellar +" .. formatNumber(math.max(0, after.Points - before.Points))
+        .. " | Points: " .. formatNumber(after.Points)
+    LastProgressionError = "-"
+
+    BlockedTargets = {}
+    AlertedRareBlocks = {}
+
+    pcall(refreshRankDepth)
+
+    if wasMining then
+        InterstellarResumePending = true
+    end
+
+    return true, result
+end
+
 local function chooseProgressionPurchase()
     local bucks = getBucksBalance()
     local upgrade = getBucksUpgradeInfo()
@@ -744,6 +886,17 @@ local function runProgressionTick()
             local sold = sellAllOresNow(false)
             if sold then
                 task.wait(PROGRESSION_BUY_DELAY)
+            end
+        end
+
+        if AUTO_INTERSTELLAR then
+            local interstellarInfo = getInterstellarInfo()
+
+            -- Interstellar has priority as soon as the normal game requirement
+            -- is met. The server still performs the final validation.
+            if interstellarInfo.CanReset then
+                performInterstellarNow(false)
+                return
             end
         end
 
@@ -2770,6 +2923,7 @@ local function applyFarmProfile(profile)
         AUTO_SELL_ORES = true
         AUTO_BUCKS_UPGRADE = true
         AUTO_RANK_UP = true
+        AUTO_INTERSTELLAR = true
         PROGRESSION_PRIORITY = "Smart"
     elseif FARM_PROFILE == "Rare Hunt" then
         PRIORITY_MODE = "Rarest First"
@@ -2785,6 +2939,7 @@ local function applyFarmProfile(profile)
         AUTO_SELL_ORES = true
         AUTO_BUCKS_UPGRADE = true
         AUTO_RANK_UP = true
+        AUTO_INTERSTELLAR = false
         PROGRESSION_PRIORITY = "Smart"
     elseif FARM_PROFILE == "Rank Grind" then
         PRIORITY_MODE = "Smart"
@@ -2798,6 +2953,7 @@ local function applyFarmProfile(profile)
         AUTO_SELL_ORES = true
         AUTO_BUCKS_UPGRADE = false
         AUTO_RANK_UP = true
+        AUTO_INTERSTELLAR = true
         PROGRESSION_PRIORITY = "Rank First"
     elseif FARM_PROFILE == "Full Clear" then
         PRIORITY_MODE = "Highest Value"
@@ -2811,6 +2967,7 @@ local function applyFarmProfile(profile)
         AUTO_SELL_ORES = false
         AUTO_BUCKS_UPGRADE = false
         AUTO_RANK_UP = false
+        AUTO_INTERSTELLAR = false
     elseif FARM_PROFILE == "Low Movement" then
         PRIORITY_MODE = "Nearest First"
         SWEEP_MODE = "Valuable Ores + Reveal"
@@ -2823,6 +2980,7 @@ local function applyFarmProfile(profile)
         AUTO_SELL_ORES = false
         AUTO_BUCKS_UPGRADE = false
         AUTO_RANK_UP = false
+        AUTO_INTERSTELLAR = false
     end
 
     refreshRankDepth()
@@ -2841,6 +2999,7 @@ local function applyFarmProfile(profile)
         if AutoSellToggle then AutoSellToggle:SetValue(AUTO_SELL_ORES) end
         if AutoBucksUpgradeToggle then AutoBucksUpgradeToggle:SetValue(AUTO_BUCKS_UPGRADE) end
         if AutoRankToggle then AutoRankToggle:SetValue(AUTO_RANK_UP) end
+        if AutoInterstellarToggle then AutoInterstellarToggle:SetValue(AUTO_INTERSTELLAR) end
         if ProgressionPriorityDropdown then ProgressionPriorityDropdown:SetValue(PROGRESSION_PRIORITY) end
     end)
 
@@ -3342,6 +3501,7 @@ updateProgressionDisplay = function()
     local bucks = getBucksBalance()
     local upgrade = getBucksUpgradeInfo()
     local rank = getNextRankPurchaseInfo()
+    local interstellar = getInterstellarInfo()
     local oreCount, sellValue = getSellableInventorySummary()
 
     local nextUpgradeText = upgrade.Maxed
@@ -3359,14 +3519,20 @@ updateProgressionDisplay = function()
         .. "\n\nBucks Upgrade: " .. tostring(upgrade.Level) .. "/" .. tostring(upgrade.Cap)
         .. "\nNext Bucks Upgrade: " .. nextUpgradeText
         .. "\nNext Rank: " .. nextRankText
+        .. "\n\nInterstellar Points: " .. formatNumber(interstellar.Points)
+        .. "\nInterstellar Gain: +" .. formatNumber(interstellar.Gain)
+        .. "\nInterstellar Cost: " .. formatNumber(interstellar.Cost) .. " Bucks"
+        .. "\nInterstellar Ready: " .. tostring(interstellar.CanReset)
         .. "\n\nAuto Sell: " .. tostring(AUTO_SELL_ORES)
         .. " | every " .. tostring(AUTO_SELL_INTERVAL) .. "s"
         .. "\nAuto Bucks Upgrade: " .. tostring(AUTO_BUCKS_UPGRADE)
         .. "\nAuto Rank Up: " .. tostring(AUTO_RANK_UP)
+        .. "\nAuto Interstellar: " .. tostring(AUTO_INTERSTELLAR)
         .. "\nSpend Priority: " .. tostring(PROGRESSION_PRIORITY)
         .. "\n\nSession Auto Sells: " .. tostring(Stats.AutoSells or 0)
         .. "\nBucks Upgrades Bought: " .. tostring(Stats.BucksUpgradesBought or 0)
         .. "\nRanks Bought: " .. tostring(Stats.RanksBought or 0)
+        .. "\nInterstellars: " .. tostring(Stats.Interstellars or 0)
         .. "\nLast Action: " .. tostring(LastProgressionAction)
         .. "\nLast Error: " .. tostring(LastProgressionError)
 
@@ -3421,6 +3587,16 @@ AutoRankToggle = Tabs.Progression:AddToggle("AutoRankUp", {
 
 AutoRankToggle:OnChanged(function(value)
     AUTO_RANK_UP = value == true
+end)
+
+AutoInterstellarToggle = Tabs.Progression:AddToggle("AutoInterstellar", {
+    Title = "Auto Interstellar",
+    Description = "Performs Interstellar automatically as soon as the normal Bucks requirement is met, then resumes mining.",
+    Default = false
+})
+
+AutoInterstellarToggle:OnChanged(function(value)
+    AUTO_INTERSTELLAR = value == true
 end)
 
 ProgressionPriorityDropdown = Tabs.Progression:AddDropdown("ProgressionPriority", {
@@ -3491,6 +3667,28 @@ Tabs.Progression:AddButton({
     end
 })
 
+Tabs.Progression:AddButton({
+    Title = "Interstellar Now",
+    Description = "Performs one Interstellar if the normal requirement is met.",
+    Callback = function()
+        if ProgressionBusy or InterstellarBusy then
+            return
+        end
+
+        ProgressionBusy = true
+        local ok, reason = performInterstellarNow(true)
+        ProgressionBusy = false
+
+        Fluent:Notify({
+            Title = ok and "Interstellar" or "Interstellar",
+            Content = ok and tostring(LastProgressionAction) or tostring(reason),
+            Duration = 4
+        })
+
+        updateProgressionDisplay()
+    end
+})
+
 --------------------------------------------------
 -- STATS UI
 --------------------------------------------------
@@ -3530,6 +3728,7 @@ updateStatsDisplay = function()
         .. "\nAuto Sells: " .. tostring(Stats.AutoSells or 0)
         .. "\nBucks Upgrades Bought: " .. tostring(Stats.BucksUpgradesBought or 0)
         .. "\nRanks Bought: " .. tostring(Stats.RanksBought or 0)
+        .. "\nInterstellars: " .. tostring(Stats.Interstellars or 0)
         .. "\nLast Reset: " .. tostring(Stats.LastResetReason or "-")
 
     pcall(function()
@@ -3711,6 +3910,13 @@ task.spawn(function()
         if AutoMine then
             checkStopConditions()
 
+            if InterstellarResumePending
+                and not InterstellarBusy
+                and not IsResetting then
+                InterstellarResumePending = false
+                scheduleAutoResume("interstellar")
+            end
+
             local currentFolder = MiningServiceClient.mineFolder
             if currentFolder ~= LastObservedMineFolder then
                 LastObservedMineFolder = currentFolder
@@ -3732,7 +3938,10 @@ task.spawn(function()
         -- Progression automation is tied to Auto Mine so enabling a spend
         -- toggle does not silently spend currency while the miner is stopped.
         if AutoMine
-            and (AUTO_SELL_ORES or AUTO_BUCKS_UPGRADE or AUTO_RANK_UP) then
+            and (AUTO_SELL_ORES
+                or AUTO_BUCKS_UPGRADE
+                or AUTO_RANK_UP
+                or AUTO_INTERSTELLAR) then
             runProgressionTick()
         end
     end
@@ -3755,4 +3964,4 @@ updateStatsDisplay()
 updateProgressDisplay()
 updateProgressionDisplay()
 Window:SelectTab(1)
-warn("[SmartOreMiner] SMART V4 FIX7 ALL ORES ready")
+warn("[SmartOreMiner] SMART V4 FIX8 AUTO INTERSTELLAR ready")
