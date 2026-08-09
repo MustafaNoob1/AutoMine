@@ -1,4 +1,4 @@
-warn("[SmartOreMiner] SMART V4 FIX9 INTERSTELLAR RESUME loaded")
+warn("[SmartOreMiner] SMART V4 FIX10 ORE COLLECTOR loaded")
 
 -- Smart Ore Miner V4
 -- FIX6 COMPAT: reduces top-level local variables to avoid executor/Luau local-register compile limits.
@@ -27,6 +27,7 @@ warn("[SmartOreMiner] SMART V4 FIX9 INTERSTELLAR RESUME loaded")
 --  * Auto Rank Up
 --  * Smart progression spending priority
 --  * Auto Interstellar reset + automatic mining resume
+--  * Ore Collector: farms selected ores at their highest-weight unlocked layers
 
 --------------------------------------------------
 -- LIBRARIES
@@ -118,6 +119,13 @@ STALL_LIMIT = 8
 PRIORITY_MODE = "Smart"
 SWEEP_MODE = "Full Layer"
 ORE_LIST_MODE = "All Ores"
+
+-- Ore Collector dynamically overrides the effective depth while active.
+COLLECTOR_ACTIVE_Y = nil
+COLLECTOR_PLAN = {}
+COLLECTOR_UNAVAILABLE = {}
+COLLECTOR_CYCLE = 0
+COLLECTOR_PLAN_VERSION = 0
 
 -- Smart automation. Manual keeps the exact Start / End inputs.
 FARM_PROFILE = "Custom"
@@ -226,6 +234,8 @@ SuppressOreDropdownCallback = false
 VisibleOreDisplayNames = {}
 ProfileDropdown = nil
 AutoDepthDropdown = nil
+CollectorDisplay = nil
+updateCollectorDisplay = nil
 PriorityDropdown = nil
 SweepDropdown = nil
 AutoResetToggle = nil
@@ -941,6 +951,15 @@ local function runProgressionTick()
 end
 
 local function getEffectiveDepthRange()
+    if AUTO_DEPTH_MODE == "Ore Collector" and COLLECTOR_ACTIVE_Y ~= nil then
+        local collectorY = safeNumber(COLLECTOR_ACTIVE_Y)
+        if collectorY ~= nil then
+            collectorY = math.clamp(collectorY, MIN_DEPTH, 0)
+            collectorY = math.max(collectorY, safeNumber(RANK_MAX_DEPTH) or MIN_DEPTH)
+            return collectorY, collectorY
+        end
+    end
+
     local requestedStart = safeNumber(START_DEPTH) or 0
     local requestedEnd = safeNumber(END_DEPTH) or MIN_DEPTH
     local rankLimit = safeNumber(RANK_MAX_DEPTH) or MIN_DEPTH
@@ -1230,7 +1249,7 @@ local function applyAutomaticDepth(showNotification)
         mode = "Deepest Unlocked"
     end
 
-    if mode == "Manual" then
+    if mode == "Manual" or mode == "Ore Collector" then
         Stats.BestAutoDepth = nil
         Stats.BestAutoDepthScore = 0
         return false
@@ -1366,6 +1385,162 @@ local function getAvailableOreIdsForRange()
     end)
 
     return result
+end
+
+function buildOreCollectorPlan()
+    local layers = MiningInfo._layers or {}
+    local planByY = {}
+    local unavailable = {}
+    local rankInfo = getRankDepthInfo()
+    local maxUnlockedDepth = math.abs(safeNumber(RANK_MAX_DEPTH) or 0)
+    local maxLayerCount = rankInfo and safeNumber(rankInfo.Layers) or #layers
+
+    if maxLayerCount == nil or maxLayerCount <= 0 then
+        maxLayerCount = #layers
+    end
+
+    maxLayerCount = math.min(math.floor(maxLayerCount), #layers)
+
+    for rawId, enabled in pairs(OreSelectionPreference) do
+        local id = tostring(rawId)
+
+        if enabled == true
+            and OreIdToDisplay[id]
+            and not id:match("^StoneOre%d*$")
+            and id ~= "Bedrock" then
+
+            local bestDepth = nil
+            local bestWeight = nil
+            local bestLayerIndex = nil
+
+            for index = 1, maxLayerCount do
+                local layer = layers[index]
+                local depth = safeNumber(layer and layer.depth)
+
+                if depth ~= nil
+                    and depth <= maxUnlockedDepth
+                    and depth < 5000 then
+
+                    for _, entry in pairs(layer.blocks or {}) do
+                        if tostring(entry.block or "") == id then
+                            local weight = safeNumber(entry.weight)
+
+                            if weight ~= nil and weight > 0 then
+                                if bestWeight == nil
+                                    or weight > bestWeight
+                                    or (weight == bestWeight
+                                        and (bestDepth == nil or depth < bestDepth)) then
+                                    bestDepth = depth
+                                    bestWeight = weight
+                                    bestLayerIndex = index
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            if bestDepth ~= nil and bestWeight ~= nil then
+                local y = -bestDepth
+                y = math.max(y, safeNumber(RANK_MAX_DEPTH) or MIN_DEPTH)
+
+                local step = planByY[y]
+                if not step then
+                    step = {
+                        Y = y,
+                        Depth = bestDepth,
+                        LayerIndex = bestLayerIndex,
+                        Ores = {},
+                        BestWeight = 0
+                    }
+                    planByY[y] = step
+                end
+
+                table.insert(step.Ores, {
+                    Id = id,
+                    Name = tostring(OreIdToDisplay[id] or id),
+                    Weight = bestWeight
+                })
+
+                if bestWeight > (step.BestWeight or 0) then
+                    step.BestWeight = bestWeight
+                end
+            else
+                table.insert(unavailable, tostring(OreIdToDisplay[id] or id))
+            end
+        end
+    end
+
+    local plan = {}
+    for _, step in pairs(planByY) do
+        table.sort(step.Ores, function(a, b)
+            if a.Weight ~= b.Weight then
+                return a.Weight > b.Weight
+            end
+            return tostring(a.Name) < tostring(b.Name)
+        end)
+        table.insert(plan, step)
+    end
+
+    -- Shallow -> deep minimizes travel and lets one mine cycle naturally
+    -- progress down through the selected best layers.
+    table.sort(plan, function(a, b)
+        return (a.Depth or 0) < (b.Depth or 0)
+    end)
+
+    table.sort(unavailable)
+
+    COLLECTOR_PLAN = plan
+    COLLECTOR_UNAVAILABLE = unavailable
+    COLLECTOR_PLAN_VERSION = (COLLECTOR_PLAN_VERSION or 0) + 1
+
+    return plan, unavailable
+end
+
+function getOreCollectorPlanText()
+    local plan, unavailable = buildOreCollectorPlan()
+    local lines = {}
+
+    if #plan == 0 then
+        table.insert(lines, "No selected ore has an unlocked spawn layer.")
+    else
+        for index, step in ipairs(plan) do
+            local oreParts = {}
+
+            for _, ore in ipairs(step.Ores or {}) do
+                table.insert(
+                    oreParts,
+                    tostring(ore.Name) .. " (w " .. tostring(ore.Weight) .. ")"
+                )
+            end
+
+            table.insert(
+                lines,
+                tostring(index)
+                    .. ". Y " .. tostring(step.Y)
+                    .. " | " .. table.concat(oreParts, ", ")
+            )
+        end
+    end
+
+    if #unavailable > 0 then
+        table.insert(lines, "")
+        table.insert(lines, "Locked / no unlocked layer: " .. table.concat(unavailable, ", "))
+    end
+
+    return table.concat(lines, "\n")
+end
+
+updateCollectorDisplay = function()
+    if not CollectorDisplay then
+        return
+    end
+
+    local value = getOreCollectorPlanText()
+
+    pcall(function()
+        CollectorDisplay:SetDesc(value)
+    end)
 end
 
 local function rebuildSelectedOresFromPreferences(availableIds)
@@ -2796,12 +2971,177 @@ local function requestMineReset(run)
 end
 
 --------------------------------------------------
+-- ORE COLLECTOR
+--------------------------------------------------
+function farmOreCollectorLayer(run, step)
+    COLLECTOR_ACTIVE_Y = safeNumber(step and step.Y)
+
+    if COLLECTOR_ACTIVE_Y == nil then
+        return false
+    end
+
+    Stats.Status = "Ore Collector @ " .. tostring(COLLECTOR_ACTIVE_Y)
+    Stats.CurrentSweepY = COLLECTOR_ACTIVE_Y
+    BlockedTargets = {}
+
+    rebuildWholeIndex()
+    rebuildSelectedIndex()
+
+    local reached, anchorX, anchorZ = reachStartDepth(run)
+    if not reached or not isRunning(run) then
+        return false
+    end
+
+    rescanMine()
+    rebuildSelectedIndex()
+
+    while isRunning(run)
+        and AUTO_DEPTH_MODE == "Ore Collector"
+        and COLLECTOR_ACTIVE_Y == safeNumber(step.Y) do
+
+        rescanMine()
+
+        -- Selected ores always have first priority.
+        local target = getSelectedTarget(anchorX, anchorZ)
+
+        if target then
+            local x, _, z = getCoordinatesFromName(target)
+            x = safeNumber(x)
+            z = safeNumber(z)
+
+            if x ~= nil then anchorX = x end
+            if z ~= nil then anchorZ = z end
+
+            Stats.CurrentSweepY = COLLECTOR_ACTIVE_Y
+            mineTarget(target, "selected", run)
+            task.wait()
+            rescanMine()
+        else
+            -- Reveal the horizontal layer so hidden selected ores can appear.
+            local revealTarget, revealY = getRevealTarget(anchorX, anchorZ)
+            revealY = safeNumber(revealY)
+
+            if revealTarget
+                and revealY == COLLECTOR_ACTIVE_Y
+                and validDepth(revealY) then
+
+                local x, _, z = getCoordinatesFromName(revealTarget)
+                x = safeNumber(x)
+                z = safeNumber(z)
+
+                if x ~= nil then anchorX = x end
+                if z ~= nil then anchorZ = z end
+
+                mineTarget(revealTarget, "any", run)
+                task.wait()
+                rescanMine()
+            else
+                Stats.Status = "Collector layer complete @ " .. tostring(COLLECTOR_ACTIVE_Y)
+                return true
+            end
+        end
+
+        if checkStopConditions() then
+            return false
+        end
+    end
+
+    return false
+end
+
+function runOreCollector(run)
+    while isRunning(run) and AUTO_DEPTH_MODE == "Ore Collector" do
+        refreshRankDepth()
+
+        local plan = buildOreCollectorPlan()
+
+        if updateCollectorDisplay then
+            updateCollectorDisplay()
+        end
+
+        if #plan == 0 then
+            COLLECTOR_ACTIVE_Y = nil
+            Stats.Status = "Ore Collector: no unlocked selected ore"
+
+            Fluent:Notify({
+                Title = "Ore Collector",
+                Content = "No selected ore has an unlocked spawn layer.",
+                Duration = 5
+            })
+            return
+        end
+
+        COLLECTOR_CYCLE = (COLLECTOR_CYCLE or 0) + 1
+        CycleStartTime = os.clock()
+        CycleStartBlocks = Stats.BlocksMined
+        CycleStartOres = Stats.OresMined
+        LastOreMinedAt = LastOreMinedAt or os.clock()
+
+        for index, step in ipairs(plan) do
+            if not isRunning(run) or AUTO_DEPTH_MODE ~= "Ore Collector" then
+                COLLECTOR_ACTIVE_Y = nil
+                return
+            end
+
+            COLLECTOR_ACTIVE_Y = safeNumber(step.Y)
+            BlockedTargets = {}
+            AlertedRareBlocks = {}
+
+            if updateRankDisplay then
+                updateRankDisplay()
+            end
+
+            local oreNames = {}
+            for _, ore in ipairs(step.Ores or {}) do
+                table.insert(oreNames, tostring(ore.Name))
+            end
+
+            Fluent:Notify({
+                Title = "Ore Collector " .. tostring(index) .. "/" .. tostring(#plan),
+                Content = table.concat(oreNames, ", ")
+                    .. " | best layer Y " .. tostring(COLLECTOR_ACTIVE_Y),
+                Duration = 3
+            })
+
+            if not farmOreCollectorLayer(run, step) then
+                COLLECTOR_ACTIVE_Y = nil
+                return
+            end
+        end
+
+        COLLECTOR_ACTIVE_Y = nil
+
+        if not isRunning(run) then
+            return
+        end
+
+        -- All optimal layers were swept. Reset the mine normally and repeat.
+        Stats.Status = "Ore Collector: resetting mine"
+        Stats.LastResetReason = "Ore Collector cycle complete"
+
+        if not requestMineReset(run) then
+            requestStop("Ore Collector reset failed")
+            return
+        end
+
+        task.wait(0.25)
+    end
+
+    COLLECTOR_ACTIVE_Y = nil
+end
+
+--------------------------------------------------
 -- START MINING / CYCLE LOOP
 --------------------------------------------------
 local function startMining(run)
     task.spawn(function()
         refreshRankDepth()
-        applyAutomaticDepth(false)
+
+        if AUTO_DEPTH_MODE ~= "Ore Collector" then
+            COLLECTOR_ACTIVE_Y = nil
+            applyAutomaticDepth(false)
+        end
+
         BlockedTargets = {}
 
         if refreshOreDropdownForRange then
@@ -2812,6 +3152,12 @@ local function startMining(run)
         end
 
         if not waitForMine(run) then
+            return
+        end
+
+        if AUTO_DEPTH_MODE == "Ore Collector" then
+            runOreCollector(run)
+            COLLECTOR_ACTIVE_Y = nil
             return
         end
 
@@ -2906,6 +3252,7 @@ ProfileDropdown = Tabs.Main:AddDropdown("FarmProfile", {
         "Max Money",
         "Rare Hunt",
         "Rank Grind",
+        "Ore Collector",
         "Full Clear",
         "Low Movement"
     },
@@ -2964,6 +3311,21 @@ local function applyFarmProfile(profile)
         AUTO_RANK_UP = true
         AUTO_INTERSTELLAR = true
         PROGRESSION_PRIORITY = "Rank First"
+    elseif FARM_PROFILE == "Ore Collector" then
+        PRIORITY_MODE = "Nearest First"
+        SWEEP_MODE = "Valuable Ores + Reveal"
+        AUTO_DEPTH_MODE = "Ore Collector"
+        AUTO_RESET_MINE = true
+        SMART_RESET = false
+        SMART_RANK_GRIND = false
+        SYSTEMATIC_SWEEP = true
+        AUTO_RESUME = true
+        RARE_ALERT_ENABLED = true
+        RARE_PRIORITY_OVERRIDE = true
+        AUTO_SELL_ORES = true
+        AUTO_BUCKS_UPGRADE = false
+        AUTO_RANK_UP = false
+        AUTO_INTERSTELLAR = false
     elseif FARM_PROFILE == "Full Clear" then
         PRIORITY_MODE = "Highest Value"
         SWEEP_MODE = "Full Layer"
@@ -3046,7 +3408,8 @@ AutoDepthDropdown = Tabs.Main:AddDropdown("AutoDepthMode", {
         "Manual",
         "Best Profit",
         "Deepest Unlocked",
-        "Rarest Layer"
+        "Rarest Layer",
+        "Ore Collector"
     },
     Multi = false,
     Default = 1
@@ -3057,18 +3420,52 @@ AutoDepthDropdown:OnChanged(function(value)
         return
     end
 
+    local previousMode = AUTO_DEPTH_MODE
     AUTO_DEPTH_MODE = tostring(value)
+
+    if previousMode == "Ore Collector" and AUTO_DEPTH_MODE ~= "Ore Collector" then
+        COLLECTOR_ACTIVE_Y = nil
+    end
+
     if AUTO_DEPTH_MODE ~= "Manual" then
         FARM_PROFILE = "Custom"
         refreshRankDepth()
-        applyAutomaticDepth(true)
+
+        if AUTO_DEPTH_MODE == "Ore Collector" then
+            buildOreCollectorPlan()
+
+            if updateCollectorDisplay then
+                updateCollectorDisplay()
+            end
+
+            Fluent:Notify({
+                Title = "Ore Collector",
+                Content = "Selected ores will be farmed at their highest-weight unlocked layers.",
+                Duration = 4
+            })
+        else
+            applyAutomaticDepth(true)
+        end
+
         refreshOreDropdownForRange()
+
         if updateRankDisplay then
             updateRankDisplay()
         end
+
+        restartActiveMiner()
+    else
+        COLLECTOR_ACTIVE_Y = nil
         restartActiveMiner()
     end
 end)
+
+CollectorDisplay = Tabs.Main:AddParagraph({
+    Title = "Ore Collector Plan",
+    Content = "Select ores, then choose Auto Depth -> Ore Collector."
+})
+
+updateCollectorDisplay()
 
 --------------------------------------------------
 -- MAIN UI: ORE LIST MODE
@@ -3135,6 +3532,14 @@ OreDropdown:OnChanged(function(values)
     local availableIds = getAvailableOreIdsForRange()
     rebuildSelectedOresFromPreferences(availableIds)
     rebuildSelectedIndex()
+
+    if updateCollectorDisplay then
+        updateCollectorDisplay()
+    end
+
+    if AUTO_DEPTH_MODE == "Ore Collector" and AutoMine then
+        restartActiveMiner()
+    end
 end)
 
 -- Select every currently available ore AFTER the dropdown exists.
@@ -3329,6 +3734,13 @@ updateRankDisplay = function()
         .. "\nAuto Depth: " .. tostring(AUTO_DEPTH_MODE)
         .. "\nPriority: " .. tostring(PRIORITY_MODE)
         .. "\nSweep: " .. tostring(SWEEP_MODE)
+
+    if AUTO_DEPTH_MODE == "Ore Collector" then
+        text = text
+            .. "\nCollector Cycle: " .. tostring(COLLECTOR_CYCLE or 0)
+            .. "\nCollector Active Y: " .. tostring(COLLECTOR_ACTIVE_Y or "-")
+            .. "\nCollector Best Layers: " .. tostring(#(COLLECTOR_PLAN or {}))
+    end
 
     if effectiveStart == effectiveEnd then
         text = text .. "\nMode: Full Layer @ " .. tostring(effectiveStart)
@@ -3738,6 +4150,8 @@ updateStatsDisplay = function()
         .. "\nBucks Upgrades Bought: " .. tostring(Stats.BucksUpgradesBought or 0)
         .. "\nRanks Bought: " .. tostring(Stats.RanksBought or 0)
         .. "\nInterstellars: " .. tostring(Stats.Interstellars or 0)
+        .. "\nCollector Cycle: " .. tostring(COLLECTOR_CYCLE or 0)
+        .. "\nCollector Active Y: " .. tostring(COLLECTOR_ACTIVE_Y or "-")
         .. "\nLast Reset: " .. tostring(Stats.LastResetReason or "-")
 
     pcall(function()
@@ -3860,6 +4274,14 @@ pcall(function()
         AlertedRareBlocks = {}
         rebuildWholeIndex()
         refreshOreDropdownForRange()
+
+        if AUTO_DEPTH_MODE == "Ore Collector" then
+            buildOreCollectorPlan()
+            if updateCollectorDisplay then
+                updateCollectorDisplay()
+            end
+        end
+
         updateRankDisplay()
 
         Fluent:Notify({
@@ -4075,4 +4497,4 @@ updateStatsDisplay()
 updateProgressDisplay()
 updateProgressionDisplay()
 Window:SelectTab(1)
-warn("[SmartOreMiner] SMART V4 FIX9 INTERSTELLAR RESUME ready")
+warn("[SmartOreMiner] SMART V4 FIX10 ORE COLLECTOR ready")
