@@ -1,4 +1,4 @@
-warn("[SmartOreMiner] SMART V4 FIX8 AUTO INTERSTELLAR loaded")
+warn("[SmartOreMiner] SMART V4 FIX9 INTERSTELLAR RESUME loaded")
 
 -- Smart Ore Miner V4
 -- FIX6 COMPAT: reduces top-level local variables to avoid executor/Luau local-register compile limits.
@@ -142,6 +142,8 @@ PROGRESSION_MAX_UPGRADES_PER_TICK = 3
 ProgressionBusy = false
 InterstellarBusy = false
 InterstellarResumePending = false
+InterstellarOldBlocks = nil
+InterstellarOldFolder = nil
 LastAutoSellAt = -math.huge
 LastProgressionAction = "-"
 LastProgressionError = "-"
@@ -743,9 +745,16 @@ function performInterstellarNow(ignoreToggle)
 
     local wasMining = AutoMine == true
 
+    -- Keep references to the old mine state. Interstellar can rebuild the
+    -- blocks table / mine after the prestige response, so restarting too early
+    -- can attach the miner to stale data and leave it idle.
+    InterstellarOldBlocks = MiningServiceClient.blocks
+    InterstellarOldFolder = MiningServiceClient.mineFolder
+
     -- Stop the active mining run before the server resets progression.
     if wasMining then
         RunId = RunId + 1
+        Stats.Status = "Interstellar reset"
     end
 
     IsResetting = true
@@ -3913,14 +3922,116 @@ task.spawn(function()
             if InterstellarResumePending
                 and not InterstellarBusy
                 and not IsResetting then
+
+                -- Interstellar resume is mandatory and intentionally does NOT
+                -- depend on the generic Auto Resume toggle. The active RunId
+                -- was invalidated before prestige, so without a new run the
+                -- miner can never continue.
                 InterstellarResumePending = false
-                scheduleAutoResume("interstellar")
+
+                task.spawn(function()
+                    Stats.Status = "Waiting for mine after Interstellar"
+
+                    local timeoutAt = os.clock() + 20
+                    local mineReady = false
+
+                    while AutoMine and os.clock() < timeoutAt do
+                        local folder = MiningServiceClient.mineFolder
+                        local blocks = MiningServiceClient.blocks
+
+                        local folderChanged =
+                            InterstellarOldFolder ~= nil
+                            and folder ~= InterstellarOldFolder
+
+                        local blocksChanged =
+                            InterstellarOldBlocks ~= nil
+                            and blocks ~= InterstellarOldBlocks
+
+                        local hasFolderBlocks = false
+                        if folder then
+                            pcall(function()
+                                hasFolderBlocks = #folder:GetChildren() > 0
+                            end)
+                        end
+
+                        local hasBlockData =
+                            type(blocks) == "table"
+                            and next(blocks) ~= nil
+
+                        -- Prefer a genuinely rebuilt mine, but also accept a
+                        -- populated mine after a short grace period for game
+                        -- builds that reuse the same folder/table references.
+                        local graceReady =
+                            hasFolderBlocks
+                            and hasBlockData
+                            and (os.clock() + 15 >= timeoutAt)
+
+                        if folder
+                            and hasFolderBlocks
+                            and hasBlockData
+                            and (folderChanged or blocksChanged or graceReady) then
+                            mineReady = true
+                            break
+                        end
+
+                        task.wait(0.25)
+                    end
+
+                    if not AutoMine then
+                        return
+                    end
+
+                    -- Force all cached block/index state to be rebuilt from the
+                    -- post-Interstellar mine before starting a new mining run.
+                    disconnectFolder()
+                    clearIndex()
+                    IndexedFolder = nil
+                    LastObservedMineFolder = MiningServiceClient.mineFolder
+                    BlockedTargets = {}
+                    AlertedRareBlocks = {}
+
+                    pcall(refreshRankDepth)
+                    pcall(function()
+                        applyAutomaticDepth(false)
+                    end)
+
+                    if refreshOreDropdownForRange then
+                        pcall(refreshOreDropdownForRange)
+                    end
+
+                    rebuildSelectedIndex()
+
+                    Stats.Status = mineReady
+                        and "Resuming after Interstellar"
+                        or "Interstellar resume fallback"
+
+                    -- restartActiveMiner() creates a fresh RunId. This is the
+                    -- important part: the pre-Interstellar run was deliberately
+                    -- invalidated and cannot become active again by itself.
+                    restartActiveMiner()
+
+                    InterstellarOldBlocks = nil
+                    InterstellarOldFolder = nil
+
+                    Fluent:Notify({
+                        Title = "Interstellar",
+                        Content = mineReady
+                            and "Mine rebuilt - farming resumed."
+                            or "Resume timeout - restarted miner anyway.",
+                        Duration = 4
+                    })
+                end)
             end
 
             local currentFolder = MiningServiceClient.mineFolder
             if currentFolder ~= LastObservedMineFolder then
                 LastObservedMineFolder = currentFolder
-                scheduleAutoResume("mine recreated")
+
+                if not InterstellarResumePending
+                    and not InterstellarBusy
+                    and not IsResetting then
+                    scheduleAutoResume("mine recreated")
+                end
             end
         else
             LastObservedMineFolder = MiningServiceClient.mineFolder
@@ -3964,4 +4075,4 @@ updateStatsDisplay()
 updateProgressDisplay()
 updateProgressionDisplay()
 Window:SelectTab(1)
-warn("[SmartOreMiner] SMART V4 FIX8 AUTO INTERSTELLAR ready")
+warn("[SmartOreMiner] SMART V4 FIX9 INTERSTELLAR RESUME ready")
